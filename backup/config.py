@@ -114,14 +114,14 @@ def load_config(config_path: str) -> Config:
     role = _require_str(raw, "role")
 
     server = ServerConfig(
-        port=_get_int(raw, "server", "port", 9527),
+        port=_get_int(raw, "server", "port", default=9527),
         token=_require_str(raw, "server", "token", label="server.token"),
     )
 
     paths = _parse_paths(raw)
 
     exclude = ExcludeConfig(
-        file=_get_str(raw, "exclude", "file", ".backupignore"),
+        file=_get_str(raw, "exclude", "file", default=".backupignore"),
     )
 
     cache = CacheConfig(
@@ -130,7 +130,7 @@ def load_config(config_path: str) -> Config:
 
     trash = TrashConfig(
         dir=_require_str(raw, "trash", "dir", label="trash.dir"),
-        keep_days=_get_int(raw, "trash", "keep_days", 30),
+        keep_days=_get_int(raw, "trash", "keep_days", default=30),
     )
 
     webdav = WebdavConfig(
@@ -138,18 +138,18 @@ def load_config(config_path: str) -> Config:
     )
 
     target = TargetConfig(
-        url=_get_str(raw, "target", "url", ""),
-        rclone_remote=_get_str(raw, "target", "rclone_remote", "B_webdav"),
+        url=_get_str(raw, "target", "url", default=""),
+        rclone_remote=_get_str(raw, "target", "rclone_remote", default="B_webdav"),
     )
 
     rclone = RcloneConfig(
-        binary=_get_str(raw, "rclone", "binary", "rclone"),
-        retries=_get_int(raw, "rclone", "retries", 3),
-        transfers=_get_int(raw, "rclone", "transfers", 4),
+        binary=_get_str(raw, "rclone", "binary", default="rclone"),
+        retries=_get_int(raw, "rclone", "retries", default=3),
+        transfers=_get_int(raw, "rclone", "transfers", default=4),
     )
 
     sync = SyncConfig(
-        dry_run=_get_bool(raw, "sync", "dry_run", False),
+        dry_run=_get_bool(raw, "sync", "dry_run", default=False),
         report_dir=_require_str(raw, "sync", "report_dir", label="sync.report_dir"),
     )
 
