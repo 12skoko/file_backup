@@ -20,9 +20,11 @@ from .server import trash_file, move_file, ServerError
 def run_plan(plan: Plan, config: Config) -> SyncResult:
     """按序执行操作计划，返回执行结果。
 
-    执行顺序：Mkdir → Trash → Move → Upload
-    - Mkdir 必须在 Upload 之前，确保文件的父目录已存在
-    - Mkdir 也必须在 Trash 之前，确保回收站时间戳目录已存在
+    执行顺序：Mkdir → Move → Trash → Upload
+    - Mkdir 先建目录
+    - Move 在 Trash 前面：Bug 2 遗留的 x/x 包装文件先 rename 到正确路径，
+      留下的空包装目录再被 Trash 清理
+    - Upload 最后，此时目录结构已就绪
     """
     result = SyncResult()
 
@@ -50,26 +52,9 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
         else:
             result.errors.append({"op": "mkdir", "path": op.path, "error": err})
 
-    # ── 2. Trash（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
-    for op in plan.trashes:
-        try:
-            trash_file(
-                config.target.url,
-                config.target.token,
-                op.path,
-                op.pair_index,
-                ts,
-                is_dir=op.is_dir,
-            )
-            result.trashed.append({
-                "path": op.path,
-                "trashed_to": os.path.join(config.trash.dir, ts, op.path).replace("\\", "/"),
-                "status": "ok",
-            })
-        except ServerError as e:
-            result.errors.append({"op": "trash", "path": op.path, "error": str(e)})
-
-    # ── 3. Move（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
+    # ── 2. Move（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
+    # 必须在 Trash 前面：Bug 2 遗留的 x/x 包装文件先 rename 到正确路径，
+    # 留下的空包装目录后续被 Trash 清理
     for op in plan.moves:
         try:
             move_file(
@@ -91,6 +76,25 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
                 "new": op.new_path,
                 "error": str(e),
             })
+
+    # ── 3. Trash（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
+    for op in plan.trashes:
+        try:
+            trash_file(
+                config.target.url,
+                config.target.token,
+                op.path,
+                op.pair_index,
+                ts,
+                is_dir=op.is_dir,
+            )
+            result.trashed.append({
+                "path": op.path,
+                "trashed_to": os.path.join(config.trash.dir, ts, op.path).replace("\\", "/"),
+                "status": "ok",
+            })
+        except ServerError as e:
+            result.errors.append({"op": "trash", "path": op.path, "error": str(e)})
 
     # ── 4. Upload（目录已在步骤 1 创建，文件直接写入已存在的目录）──
     for op in plan.uploads:

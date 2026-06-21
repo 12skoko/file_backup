@@ -118,6 +118,9 @@ def should_exclude(rel_path: str, patterns: list[str]) -> bool:
             prefix = pat  # e.g. "node_modules/"
             if rel_path.startswith(prefix) or ("/" + rel_path).startswith("/" + prefix):
                 return True
+            # 也匹配目录本身（不含尾斜杠），如 .backup_trash/ 应匹配 .backup_trash
+            if rel_path == pat.rstrip("/"):
+                return True
 
     return False
 

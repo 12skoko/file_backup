@@ -364,13 +364,27 @@ class _BackupHandler(BaseHTTPRequestHandler):
         src_abs = os.path.join(pair.source, path)
         trash_abs = os.path.join(self.config.trash.dir, timestamp, path)
 
+        # 源不存在 → 可能已被父目录移动带走，视为成功
+        if not os.path.exists(src_abs):
+            self._send_json({"status": "ok", "path": path, "skipped": "源已不存在"})
+            return
+
         try:
             os.makedirs(os.path.dirname(trash_abs), exist_ok=True)
             shutil.move(src_abs, trash_abs)
             self._send_json({"status": "ok", "path": path})
-        except FileNotFoundError:
-            self._send_error(404, json.dumps({"error": f"文件不存在: {path}"}))
         except OSError as e:
+            err_str = str(e)
+            if "already exists" in err_str and os.path.isdir(src_abs):
+                # 目标目录已存在（子文件先移入导致父目录结构已创建）
+                # 尝试清理空源目录
+                try:
+                    if not os.listdir(src_abs):
+                        os.rmdir(src_abs)
+                        self._send_json({"status": "ok", "path": path, "merged": True})
+                        return
+                except OSError:
+                    pass
             self._send_error(500, json.dumps({"error": str(e)}))
 
     def _handle_move(self) -> None:
@@ -394,12 +408,22 @@ class _BackupHandler(BaseHTTPRequestHandler):
         old_abs = os.path.join(pair.source, old_path)
         new_abs = os.path.join(pair.source, new_path)
 
+        # 源不存在 → 可能已被 trash 移走，视为成功
+        if not os.path.exists(old_abs):
+            self._send_json({"status": "ok", "old": old_path, "new": new_path, "skipped": "源已不存在"})
+            return
+
+        # 目标已存在且内容相同 → 无需移动
+        if os.path.exists(new_abs):
+            self._send_json({"status": "ok", "old": old_path, "new": new_path, "skipped": "目标已存在"})
+            return
+
         try:
             os.makedirs(os.path.dirname(new_abs), exist_ok=True)
             shutil.move(old_abs, new_abs)
             self._send_json({"status": "ok", "old": old_path, "new": new_path})
         except FileNotFoundError:
-            self._send_error(404, json.dumps({"error": f"文件不存在: {old_path}"}))
+            self._send_json({"status": "ok", "old": old_path, "new": new_path, "skipped": "源已不存在"})
         except OSError as e:
             self._send_error(500, json.dumps({"error": str(e)}))
 
