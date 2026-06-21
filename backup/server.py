@@ -154,13 +154,10 @@ class BackupServer:
         self.config = config
         self._httpd: Optional[HTTPServer] = None
         self._rclone_proc: Optional[subprocess.Popen] = None
+        self._shutting_down = False
 
     def start(self) -> None:
         """启动服务（阻塞）。"""
-        if not self.config.is_target:
-            print("[ERROR] serve 命令只能在 target 模式下使用")
-            sys.exit(1)
-
         # ── 启动 rclone serve webdav ──
         self._start_rclone()
 
@@ -171,57 +168,73 @@ class BackupServer:
             _BackupHandler,
         )
 
-        # 注册退出清理
-        def cleanup(signum=None, frame=None):
-            print("\n[server] 正在关闭...")
-            self.shutdown()
+        # 只注册 SIGTERM（Unix 下 kill 命令用），SIGINT 交给 KeyboardInterrupt
+        # Windows 上 SIGINT 信号 + KeyboardInterrupt 双重触发会导致 shutdown 竞态
+        try:
+            signal.signal(signal.SIGTERM, self._on_sigterm)
+        except (ValueError, OSError):
+            pass  # Windows 不支持 SIGTERM，靠 KeyboardInterrupt
 
-        signal.signal(signal.SIGINT, cleanup)
-        signal.signal(signal.SIGTERM, cleanup)
-
-        webdav_port = self._webdav_port
         print(f"[server] B 端服务已启动")
         print(f"  HTTP   : http://0.0.0.0:{self.config.server.port}  (文件树查询)")
-        print(f"  WebDAV : http://0.0.0.0:{webdav_port}  (文件传输)")
+        print(f"  WebDAV : http://0.0.0.0:{self.config.webdav.port}  (文件传输)")
         print(f"  扫描路径: {[p.source for p in self.config.paths]}")
         print(f"  WebDAV 根: {self.config.webdav.root}")
 
         try:
             self._httpd.serve_forever()
         except KeyboardInterrupt:
-            pass
+            print("\n[server] 收到 Ctrl+C，正在关闭...")
         finally:
             self.shutdown()
 
+    def _on_sigterm(self, signum, frame):
+        """SIGTERM 信号处理（仅 Unix）。"""
+        print("\n[server] 收到 SIGTERM，正在关闭...")
+        self.shutdown()
+
     def shutdown(self) -> None:
-        """关闭服务。"""
+        """关闭服务（幂等，重复调用安全）。"""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+
+        # 1. 先关 HTTP
         if self._httpd:
-            self._httpd.shutdown()
-            self._httpd.server_close()
+            try:
+                self._httpd.shutdown()
+                self._httpd.server_close()
+            except Exception:
+                pass
             self._httpd = None
 
+        # 2. 再关 rclone WebDAV 子进程
         if self._rclone_proc:
-            self._rclone_proc.terminate()
+            print("[server] 正在关闭 rclone WebDAV...")
             try:
-                self._rclone_proc.wait(timeout=5)
+                self._rclone_proc.terminate()
+                try:
+                    self._rclone_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print("[server] rclone 未响应，强制终止...")
+                    self._rclone_proc.kill()
+                    self._rclone_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._rclone_proc.kill()
-                self._rclone_proc.wait()
-            self._rclone_proc = None
+                print("[server] rclone 强制终止失败，请手动检查")
+            except Exception as exc:
+                print(f"[server] 关闭 rclone 时出错: {exc}")
+            finally:
+                self._rclone_proc = None
 
-    @property
-    def _webdav_port(self) -> int:
-        """WebDAV 端口 = HTTP 端口 + 1。"""
-        return self.config.server.port + 1
+        print("[server] 服务已关闭")
 
     def _start_rclone(self) -> None:
         """启动 rclone serve webdav 子进程。
 
-        HTTP 和 WebDAV 协议不同，必须使用不同端口。
-        WebDAV 端口 = server.port + 1（如 HTTP:9527 → WebDAV:9528）。
+        WebDAV 端口从 config.webdav.port 读取（默认 9528，即 server.port + 1）。
         A 端配置 rclone remote 时应指向此端口。
         """
-        webdav_port = self._webdav_port
+        webdav_port = self.config.webdav.port
         webdav_root = self.config.webdav.root
 
         print(f"[server] 启动 rclone serve webdav (端口 {webdav_port})...")

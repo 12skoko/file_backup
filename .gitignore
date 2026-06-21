@@ -4,6 +4,8 @@ hosts.txt
 
 # 配置文件（含敏感信息）
 config.yaml
+config.source.yaml
+config.target.yaml
 
 # Python
 __pycache__/

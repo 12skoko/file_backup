@@ -6,7 +6,7 @@ import argparse
 import sys
 import time
 
-from .config import load_config
+from .config import load_source_config, load_target_config
 from .scanner import scan, PairScan
 from .differ import compare
 from .reporter import (
@@ -31,15 +31,15 @@ def main(argv: list[str] | None = None) -> None:
 
     # backup serve
     p_serve = sub.add_parser("serve", help="启动 B 端常驻服务")
-    p_serve.add_argument("--config", "-c", default="config.yaml", help="配置文件路径")
+    p_serve.add_argument("--config", "-c", default="config.target.yaml", help="配置文件路径")
 
     # backup diff
     p_diff = sub.add_parser("diff", help="扫描 + 对比，输出差异报告（不执行同步）")
-    p_diff.add_argument("--config", "-c", default="config.yaml", help="配置文件路径")
+    p_diff.add_argument("--config", "-c", default="config.source.yaml", help="配置文件路径")
 
     # backup sync
     p_sync = sub.add_parser("sync", help="扫描 + 对比 + 确认 + 执行同步")
-    p_sync.add_argument("--config", "-c", default="config.yaml", help="配置文件路径")
+    p_sync.add_argument("--config", "-c", default="config.source.yaml", help="配置文件路径")
     p_sync.add_argument("--yes", "-y", action="store_true", help="跳过确认，直接执行")
 
     args = parser.parse_args(argv)
@@ -53,28 +53,21 @@ def main(argv: list[str] | None = None) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# serve
+# serve（B 端）
 # ═══════════════════════════════════════════════════════════════════
 
 def cmd_serve(args) -> None:
-    cfg = load_config(args.config)
-    if cfg.role != "target":
-        print("[ERROR] serve 命令只能在 target 模式下使用")
-        sys.exit(1)
-
+    cfg = load_target_config(args.config)
     server = BackupServer(cfg)
     server.start()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# diff
+# diff（A 端预览）
 # ═══════════════════════════════════════════════════════════════════
 
 def cmd_diff(args) -> None:
-    cfg = load_config(args.config)
-    if cfg.role != "source":
-        print("[ERROR] diff 命令只能在 source 模式下使用")
-        sys.exit(1)
+    cfg = load_source_config(args.config)
 
     # 1. 扫描 A 端
     print("扫描 A 端...")
@@ -83,13 +76,13 @@ def cmd_diff(args) -> None:
 
     # 2. 拉取 B 端树
     print(f"连接 B 端 {cfg.target.url} ...")
-    if not check_health(cfg.target.url, cfg.server.token):
+    if not check_health(cfg.target.url, cfg.target.token):
         print(f"[ERROR] B 端不可达: {cfg.target.url}")
         sys.exit(1)
 
     print("拉取 B 端文件树...")
     try:
-        b_pairs_raw = get_tree(cfg.target.url, cfg.server.token)
+        b_pairs_raw = get_tree(cfg.target.url, cfg.target.token)
     except ServerError as e:
         print(f"[ERROR] {e}")
         sys.exit(1)
@@ -117,14 +110,11 @@ def cmd_diff(args) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# sync
+# sync（A 端执行）
 # ═══════════════════════════════════════════════════════════════════
 
 def cmd_sync(args) -> None:
-    cfg = load_config(args.config)
-    if cfg.role != "source":
-        print("[ERROR] sync 命令只能在 source 模式下使用")
-        sys.exit(1)
+    cfg = load_source_config(args.config)
 
     # 1. 扫描 A 端
     print("扫描 A 端...")
@@ -133,13 +123,13 @@ def cmd_sync(args) -> None:
 
     # 2. 拉取 B 端树
     print(f"连接 B 端 {cfg.target.url} ...")
-    if not check_health(cfg.target.url, cfg.server.token):
+    if not check_health(cfg.target.url, cfg.target.token):
         print(f"[ERROR] B 端不可达: {cfg.target.url}")
         sys.exit(1)
 
     print("拉取 B 端文件树...")
     try:
-        b_pairs_raw = get_tree(cfg.target.url, cfg.server.token)
+        b_pairs_raw = get_tree(cfg.target.url, cfg.target.token)
     except ServerError as e:
         print(f"[ERROR] {e}")
         sys.exit(1)

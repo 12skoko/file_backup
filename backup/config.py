@@ -1,18 +1,17 @@
-"""配置管理 — YAML 读取、校验、类型化访问。"""
+"""配置管理 — source / target 两套 YAML 格式，统一内部表示。"""
 
 from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 配置数据类
+# 配置数据类（内部统一表示）
 # ═══════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -47,11 +46,13 @@ class TrashConfig:
 @dataclass
 class WebdavConfig:
     root: str = "/backup"
+    port: int = 9528
 
 
 @dataclass
 class TargetConfig:
     url: str = ""
+    token: str = ""
     rclone_remote: str = "B_webdav"
 
 
@@ -70,7 +71,7 @@ class SyncConfig:
 
 @dataclass
 class Config:
-    """完整配置。"""
+    """完整配置（内部使用）。"""
     role: str                      # "source" | "target"
     server: ServerConfig
     paths: list[PathPair]
@@ -82,8 +83,6 @@ class Config:
     rclone: RcloneConfig
     sync: SyncConfig
 
-    # ── 派生属性 ──
-
     @property
     def is_source(self) -> bool:
         return self.role == "source"
@@ -94,215 +93,224 @@ class Config:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 加载 & 校验
+# 加载 A 端（source）配置
 # ═══════════════════════════════════════════════════════════════════
 
-def load_config(config_path: str) -> Config:
-    """从 YAML 文件加载并校验配置。"""
-    path = Path(config_path)
-    if not path.exists():
-        die(f"配置文件不存在: {config_path}")
+def load_source_config(config_path: str) -> Config:
+    """加载 A 端 (source) 配置文件。
 
-    with open(path, "r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
+    YAML 格式::
 
-    if not isinstance(raw, dict):
-        die("配置文件格式错误：顶层必须是字典")
+        target:
+          url: http://192.168.1.100:9527
+          token: "shared-secret"
+          rclone_remote: B_webdav
 
-    # ── 解析各段 ──
+        paths:
+          - source: /mnt/photos
+            target: /backup/photos
 
-    role = _require_str(raw, "role")
+        exclude_file: .backupignore
+        cache_dir: /data/.backup
 
-    server = ServerConfig(
-        port=_get_int(raw, "server", "port", default=9527),
-        token=_require_str(raw, "server", "token", label="server.token"),
+        rclone:
+          binary: rclone
+          retries: 3
+          transfers: 4
+
+        sync:
+          dry_run: false
+          report_dir: /data/.backup
+    """
+    raw = _read_yaml(config_path)
+
+    # ── target 连接 ──
+    t = raw.get("target", {})
+    if not isinstance(t, dict):
+        die("target 段必须是字典")
+
+    target = TargetConfig(
+        url=_require_str(t, "url", label="target.url"),
+        token=_require_str(t, "token", label="target.token"),
+        rclone_remote=_get_str(t, "rclone_remote", "B_webdav"),
     )
 
-    paths = _parse_paths(raw)
+    # ── 路径 ──
+    paths = _parse_source_paths(raw)
 
+    # ── 其他 ──
     exclude = ExcludeConfig(
-        file=_get_str(raw, "exclude", "file", default=".backupignore"),
+        file=_get_str(raw, "exclude_file", ".backupignore"),
     )
 
     cache = CacheConfig(
-        dir=_require_str(raw, "cache", "dir", label="cache.dir"),
+        dir=_require_str(raw, "cache_dir", label="cache_dir"),
     )
 
-    trash = TrashConfig(
-        dir=_require_str(raw, "trash", "dir", label="trash.dir"),
-        keep_days=_get_int(raw, "trash", "keep_days", default=30),
-    )
-
-    webdav = WebdavConfig(
-        root=_require_str(raw, "webdav", "root", label="webdav.root"),
-    )
-
-    target = TargetConfig(
-        url=_get_str(raw, "target", "url", default=""),
-        rclone_remote=_get_str(raw, "target", "rclone_remote", default="B_webdav"),
-    )
-
-    rclone = RcloneConfig(
-        binary=_get_str(raw, "rclone", "binary", default="rclone"),
-        retries=_get_int(raw, "rclone", "retries", default=3),
-        transfers=_get_int(raw, "rclone", "transfers", default=4),
-    )
-
-    sync = SyncConfig(
-        dry_run=_get_bool(raw, "sync", "dry_run", default=False),
-        report_dir=_require_str(raw, "sync", "report_dir", label="sync.report_dir"),
-    )
+    rclone = _parse_rclone(raw)
+    sync = _parse_sync(raw)
 
     cfg = Config(
-        role=role,
+        role="source",
+        server=ServerConfig(token=target.token),
+        paths=paths,
+        exclude=exclude,
+        cache=cache,
+        trash=TrashConfig(),          # source 端不使用回收站
+        webdav=WebdavConfig(),        # source 端不启动 WebDAV
+        target=target,
+        rclone=rclone,
+        sync=sync,
+    )
+
+    _validate_source(cfg)
+    return cfg
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 加载 B 端（target）配置
+# ═══════════════════════════════════════════════════════════════════
+
+def load_target_config(config_path: str) -> Config:
+    """加载 B 端 (target) 配置文件。
+
+    YAML 格式::
+
+        server:
+          port: 9527
+          token: "shared-secret"
+
+        webdav:
+          port: 9528
+          root: /backup
+
+        paths:
+          - /backup/photos
+          - /backup/docs
+
+        exclude_file: .backupignore
+        cache_dir: /data/.backup
+
+        trash:
+          dir: /backup/.backup_trash
+          keep_days: 30
+
+        rclone:
+          binary: rclone
+    """
+    raw = _read_yaml(config_path)
+
+    # ── 服务 ──
+    srv = raw.get("server", {})
+    if not isinstance(srv, dict):
+        die("server 段必须是字典")
+
+    server = ServerConfig(
+        port=_get_int(srv, "port", 9527),
+        token=_require_str(srv, "token", label="server.token"),
+    )
+
+    # ── WebDAV ──
+    wd = raw.get("webdav", {})
+    if not isinstance(wd, dict):
+        die("webdav 段必须是字典")
+
+    webdav = WebdavConfig(
+        root=_require_str(wd, "root", label="webdav.root"),
+        port=_get_int(wd, "port", server.port + 1),
+    )
+
+    # ── 路径 ──
+    paths = _parse_target_paths(raw)
+
+    # ── 其他 ──
+    exclude = ExcludeConfig(
+        file=_get_str(raw, "exclude_file", ".backupignore"),
+    )
+
+    cache = CacheConfig(
+        dir=_get_str(raw, "cache_dir", "/data/.backup"),
+    )
+
+    trash = _parse_trash(raw)
+    rclone = _parse_rclone(raw)
+
+    cfg = Config(
+        role="target",
         server=server,
         paths=paths,
         exclude=exclude,
         cache=cache,
         trash=trash,
         webdav=webdav,
-        target=target,
+        target=TargetConfig(),        # target 端不需要连接对端
         rclone=rclone,
-        sync=sync,
+        sync=SyncConfig(),            # target 端不输出报告
     )
 
-    # ── 校验 ──
-
-    _validate(cfg)
-
+    _validate_target(cfg)
     return cfg
 
 
-def _validate(cfg: Config) -> None:
-    """校验配置合法性。"""
+# ═══════════════════════════════════════════════════════════════════
+# 校验
+# ═══════════════════════════════════════════════════════════════════
 
-    # role
-    if cfg.role not in ("source", "target"):
-        die(f"role 必须是 source 或 target，当前: {cfg.role}")
-
-    # paths
+def _validate_source(cfg: Config) -> None:
+    """校验 source 配置。"""
     if not cfg.paths:
         die("paths 至少需要一对 source/target")
 
     for i, pp in enumerate(cfg.paths):
-        if cfg.is_source:
-            if not os.path.isdir(pp.source):
-                die(f"paths[{i}].source 路径不存在或不是目录: {pp.source}")
-        else:
-            # target 模式下 source 字段作为本地扫描路径
-            if not os.path.isdir(pp.source):
-                die(f"paths[{i}].source 路径不存在或不是目录: {pp.source}")
+        if not os.path.isdir(pp.source):
+            die(f"paths[{i}].source 路径不存在或不是目录: {pp.source}")
 
-            # target 模式下所有 source 必须在 webdav.root 下
-            src = os.path.realpath(pp.source)
-            root = os.path.realpath(cfg.webdav.root)
-            if not _is_under(src, root):
-                die(
-                    f"paths[{i}].source ({pp.source}) 不在 webdav.root "
-                    f"({cfg.webdav.root}) 下。target 模式下所有扫描路径必须"
-                    f"在 WebDAV 根目录内。"
-                )
-
-    # 多 path 之间有重叠警告
     _warn_overlapping(cfg.paths)
 
-    # token
+    if not cfg.target.token:
+        die("target.token 不能为空")
+
+    if not cfg.target.url:
+        die("target.url 不能为空")
+
+
+def _validate_target(cfg: Config) -> None:
+    """校验 target 配置。"""
     if not cfg.server.token:
         die("server.token 不能为空")
 
-    # source 模式额外检查
-    if cfg.is_source:
-        if not cfg.target.url:
-            die("source 模式下 target.url 不能为空")
-        if not cfg.target.rclone_remote:
-            die("source 模式下 target.rclone_remote 不能为空")
+    if not cfg.paths:
+        die("paths 至少需要一个路径")
 
-    # trash 应该在 webdav.root 下（rclone 需要能访问）
+    for i, pp in enumerate(cfg.paths):
+        if not os.path.isdir(pp.source):
+            die(f"paths[{i}] 路径不存在或不是目录: {pp.source}")
+
+        # 所有路径必须在 webdav.root 下
+        src = os.path.realpath(pp.source)
+        root = os.path.realpath(cfg.webdav.root)
+        if not _is_under(src, root):
+            die(
+                f"paths[{i}] ({pp.source}) 不在 webdav.root "
+                f"({cfg.webdav.root}) 下。"
+            )
+
+    # 回收站也应在 webdav.root 下
     trash_real = os.path.realpath(cfg.trash.dir)
     root_real = os.path.realpath(cfg.webdav.root)
-    if cfg.is_target and not _is_under(trash_real, root_real):
+    if not _is_under(trash_real, root_real):
         warn(
             f"trash.dir ({cfg.trash.dir}) 不在 webdav.root "
             f"({cfg.webdav.root}) 下，rclone 将无法操作回收站。"
-            f"建议将 trash.dir 设置在 webdav.root 内。"
         )
 
 
-def _warn_overlapping(paths: list[PathPair]) -> None:
-    """检查多对路径之间是否有重叠。"""
-    resolved = []
-    for pp in paths:
-        try:
-            resolved.append((pp.source, os.path.realpath(pp.source)))
-        except OSError:
-            continue
-
-    for i in range(len(resolved)):
-        for j in range(i + 1, len(resolved)):
-            si, ri = resolved[i]
-            sj, rj = resolved[j]
-            if _is_under(ri, rj) or _is_under(rj, ri):
-                warn(f"paths[{i}].source ({si}) 与 paths[{j}].source ({sj}) 路径有重叠")
-
-
 # ═══════════════════════════════════════════════════════════════════
-# YAML 读取辅助
+# 段落解析
 # ═══════════════════════════════════════════════════════════════════
 
-def _get(raw: dict, *keys: str):
-    """逐层取值，任意层缺失返回 None。"""
-    cur = raw
-    for k in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(k)
-        if cur is None:
-            return None
-    return cur
-
-
-def _require_str(raw: dict, *keys: str, label: str = "") -> str:
-    """逐层取字符串值，缺失或为空则退出。"""
-    val = _get(raw, *keys)
-    label = label or '.'.join(keys)
-    if val is None or (isinstance(val, str) and not val.strip()):
-        die(f"{label} 必须是非空字符串")
-    return str(val)
-
-
-def _get_str(raw: dict, *keys: str, default: str = "") -> str:
-    """逐层取字符串值，缺失返回默认。"""
-    val = _get(raw, *keys)
-    if val is None:
-        return default
-    return str(val)
-
-
-def _get_int(raw: dict, *keys: str, default: int = 0) -> int:
-    """逐层取整数值。"""
-    val = _get(raw, *keys)
-    if val is None:
-        return default
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        die(f"{'.'.join(keys)} 必须是整数，当前: {val}")
-        return default
-
-
-def _get_bool(raw: dict, *keys: str, default: bool = False) -> bool:
-    """逐层取布尔值。"""
-    val = _get(raw, *keys)
-    if val is None:
-        return default
-    if isinstance(val, bool):
-        return val
-    die(f"{'.'.join(keys)} 必须是布尔值，当前: {val}")
-    return default
-
-
-def _parse_paths(raw: dict) -> list[PathPair]:
-    """解析 paths 列表。"""
+def _parse_source_paths(raw: dict) -> list[PathPair]:
+    """解析 source 端的 paths（必须含 source → target 映射）。"""
     raw_paths = raw.get("paths", [])
     if not raw_paths:
         die("paths 至少需要一对 source/target")
@@ -310,7 +318,7 @@ def _parse_paths(raw: dict) -> list[PathPair]:
     result = []
     for i, entry in enumerate(raw_paths):
         if not isinstance(entry, dict):
-            die(f"paths[{i}] 必须是字典")
+            die(f"paths[{i}] 必须是字典，格式: {{source: ..., target: ...}}")
         source = entry.get("source", "")
         target = entry.get("target", "")
         if not source:
@@ -321,8 +329,119 @@ def _parse_paths(raw: dict) -> list[PathPair]:
     return result
 
 
+def _parse_target_paths(raw: dict) -> list[PathPair]:
+    """解析 target 端的 paths（字符串列表或字典列表）。"""
+    raw_paths = raw.get("paths", [])
+    if not raw_paths:
+        die("paths 至少需要一个路径")
+
+    result = []
+    for i, entry in enumerate(raw_paths):
+        if isinstance(entry, str):
+            result.append(PathPair(source=entry, target=entry))
+        elif isinstance(entry, dict):
+            source = entry.get("source", entry.get("path", ""))
+            target = entry.get("target", source)
+            if not source:
+                die(f"paths[{i}] 路径不能为空")
+            result.append(PathPair(source=str(source), target=str(target)))
+        else:
+            die(f"paths[{i}] 必须是字符串或字典")
+    return result
+
+
+def _parse_rclone(raw: dict) -> RcloneConfig:
+    """解析 rclone 段。"""
+    r = raw.get("rclone", {})
+    if not isinstance(r, dict):
+        return RcloneConfig()
+    return RcloneConfig(
+        binary=_get_str(r, "binary", "rclone"),
+        retries=_get_int(r, "retries", 3),
+        transfers=_get_int(r, "transfers", 4),
+    )
+
+
+def _parse_sync(raw: dict) -> SyncConfig:
+    """解析 sync 段。"""
+    s = raw.get("sync", {})
+    if not isinstance(s, dict):
+        return SyncConfig()
+    return SyncConfig(
+        dry_run=_get_bool(s, "dry_run", False),
+        report_dir=_get_str(s, "report_dir", "/data/.backup"),
+    )
+
+
+def _parse_trash(raw: dict) -> TrashConfig:
+    """解析 trash 段。"""
+    t = raw.get("trash", {})
+    if not isinstance(t, dict):
+        return TrashConfig()
+    return TrashConfig(
+        dir=_get_str(t, "dir", "/backup/.backup_trash"),
+        keep_days=_get_int(t, "keep_days", 30),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════
-# 工具函数
+# YAML 读取辅助
+# ═══════════════════════════════════════════════════════════════════
+
+def _read_yaml(path_str: str) -> dict:
+    """读取 YAML 文件，返回顶层字典。"""
+    p = Path(path_str)
+    if not p.exists():
+        die(f"配置文件不存在: {path_str}")
+    with open(p, "r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    if not isinstance(raw, dict):
+        die("配置文件格式错误：顶层必须是字典")
+    return raw
+
+
+def _require_str(d: dict, key: str, label: str = "") -> str:
+    """读取必需的非空字符串，缺失则报错退出。"""
+    val = d.get(key)
+    label = label or key
+    if val is None or (isinstance(val, str) and not val.strip()):
+        die(f"{label} 必须是非空字符串")
+    return str(val)
+
+
+def _get_str(d: dict, key: str, default: str = "") -> str:
+    """读取可选字符串。"""
+    val = d.get(key)
+    if val is None:
+        return default
+    return str(val)
+
+
+def _get_int(d: dict, key: str, default: int = 0) -> int:
+    """读取可选整数。"""
+    val = d.get(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        die(f"{key} 必须是整数，当前: {val}")
+        return default
+
+
+def _get_bool(d: dict, key: str, default: bool = False) -> bool:
+    """读取可选布尔值。"""
+    val = d.get(key)
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    die(f"{key} 必须是布尔值，当前: {val}")
+    return default
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 工具
 # ═══════════════════════════════════════════════════════════════════
 
 def _is_under(child: str, parent: str) -> bool:
@@ -335,12 +454,26 @@ def _is_under(child: str, parent: str) -> bool:
         return False
 
 
+def _warn_overlapping(paths: list[PathPair]) -> None:
+    """检查多对路径之间是否有重叠。"""
+    resolved = []
+    for pp in paths:
+        try:
+            resolved.append((pp.source, os.path.realpath(pp.source)))
+        except OSError:
+            continue
+    for i in range(len(resolved)):
+        for j in range(i + 1, len(resolved)):
+            si, ri = resolved[i]
+            sj, rj = resolved[j]
+            if _is_under(ri, rj) or _is_under(rj, ri):
+                warn(f"paths[{i}].source ({si}) 与 paths[{j}].source ({sj}) 路径有重叠")
+
+
 def die(msg: str) -> None:
-    """打印错误并退出。"""
     print(f"[ERROR] {msg}", file=sys.stderr)
     sys.exit(1)
 
 
 def warn(msg: str) -> None:
-    """打印警告。"""
     print(f"[WARN] {msg}", file=sys.stderr)

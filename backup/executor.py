@@ -22,13 +22,11 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
 
     rclone_bin = config.rclone.binary
     remote = config.target.rclone_remote
-    webdav_root = config.webdav.root
-    trash_dir = config.trash.dir
     retries = config.rclone.retries
     transfers = config.rclone.transfers
     dry_run = config.sync.dry_run
 
-    # 回收站时间戳（精确到秒，加微秒避免碰撞）
+    # 回收站时间戳
     ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
     # ── 1. Trash ──
@@ -44,7 +42,7 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
         if ok:
             result.trashed.append({
                 "path": op.path,
-                "trashed_to": os.path.join(trash_dir, ts, op.path).replace("\\", "/"),
+                "trashed_to": os.path.join(config.trash.dir, ts, op.path).replace("\\", "/"),
                 "status": "ok",
             })
         else:
@@ -114,8 +112,27 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 路径计算
+# 路径计算（纯字符串操作，不依赖 os.path.relpath）
 # ═══════════════════════════════════════════════════════════════════
+
+def _strip_prefix(path: str, prefix: str) -> str:
+    """去掉 path 的 prefix 前缀部分，返回相对路径。
+
+    纯字符串操作，跨平台安全。
+    例: _strip_prefix('/backup/photos', '/backup') → 'photos'
+        _strip_prefix('/backup', '/backup') → ''
+    """
+    # 规范化：统一正斜杠，去掉尾斜杠
+    p = path.replace("\\", "/").rstrip("/")
+    pre = prefix.replace("\\", "/").rstrip("/")
+
+    if p == pre:
+        return ""
+    if p.startswith(pre + "/"):
+        return p[len(pre) + 1:]
+    # 前缀不匹配 —— 回退到最后一层目录名
+    return p.rsplit("/", 1)[-1] if "/" in p else p
+
 
 def _rclone_path(rel_path: str, pair_index: int, config: Config) -> str:
     """计算文件在 rclone remote 中的路径。
@@ -125,22 +142,23 @@ def _rclone_path(rel_path: str, pair_index: int, config: Config) -> str:
          → photos/2024/me.jpg
     """
     target_path = config.paths[pair_index].target
-    target_rel = os.path.relpath(target_path, config.webdav.root)
-    # 如果 target 就是 webdav root，relpath 返回 "."
-    if target_rel == ".":
-        return rel_path.replace("\\", "/")
-    return (target_rel + "/" + rel_path).replace("\\", "/")
+    target_rel = _strip_prefix(target_path, config.webdav.root)
+    rel_path = rel_path.replace("\\", "/")
+
+    if not target_rel:
+        return rel_path
+    return f"{target_rel}/{rel_path}"
 
 
 def _trash_rclone_path(rel_path: str, timestamp: str, config: Config) -> str:
     """计算回收站中文件的 rclone 路径。"""
     trash_dir = config.trash.dir
-    trash_rel = os.path.relpath(trash_dir, config.webdav.root)
-    if trash_rel == ".":
-        path = f"{timestamp}/{rel_path}"
-    else:
-        path = f"{trash_rel}/{timestamp}/{rel_path}"
-    return path.replace("\\", "/")
+    trash_rel = _strip_prefix(trash_dir, config.webdav.root)
+    rel_path = rel_path.replace("\\", "/")
+
+    if not trash_rel:
+        return f"{timestamp}/{rel_path}"
+    return f"{trash_rel}/{timestamp}/{rel_path}"
 
 
 # ═══════════════════════════════════════════════════════════════════
