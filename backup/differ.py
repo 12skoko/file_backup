@@ -33,10 +33,11 @@ class UploadOp:
 
 @dataclass
 class TrashOp:
-    """将 B 端文件移入回收站。"""
+    """将 B 端文件／目录移入回收站。"""
     path: str          # 相对路径
     size: int
     pair_index: int
+    is_dir: bool = False
 
 
 @dataclass
@@ -47,35 +48,17 @@ class MkdirOp:
 
 
 @dataclass
-class ExtraFile:
-    """B 端多出的文件（仅报告，不操作）。"""
-    path: str
-    size: int
-    pair_index: int
-
-
-@dataclass
-class ExtraDir:
-    """B 端多出的目录（仅报告，不操作）。"""
-    path: str
-    pair_index: int
-
-
-@dataclass
 class Plan:
     """差异操作计划。"""
     uploads: list[UploadOp] = field(default_factory=list)
     moves: list[MoveOp] = field(default_factory=list)
     trashes: list[TrashOp] = field(default_factory=list)
     mkdirs: list[MkdirOp] = field(default_factory=list)
-    extra_files: list[ExtraFile] = field(default_factory=list)
-    extra_dirs: list[ExtraDir] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
         return not any([
             self.uploads, self.moves, self.trashes, self.mkdirs,
-            self.extra_files, self.extra_dirs,
         ])
 
     @property
@@ -175,15 +158,10 @@ def _diff_one_pair(
                 pair_index=pair_index,
             ))
 
-    # ── 4. B 有 A 无 → Trash + Extra ──
+    # ── 4. B 有 A 无 → Trash（直接移入回收站）──
     for path, fi in b_files.items():
         if path not in matched_b:
             plan.trashes.append(TrashOp(
-                path=path,
-                size=fi.size,
-                pair_index=pair_index,
-            ))
-            plan.extra_files.append(ExtraFile(
                 path=path,
                 size=fi.size,
                 pair_index=pair_index,
@@ -197,9 +175,14 @@ def _diff_one_pair(
     for d in sorted(a_dirs - b_dirs):
         plan.mkdirs.append(MkdirOp(path=d, pair_index=pair_index))
 
-    # B 有 A 无 → Extra
+    # B 有 A 无 → Trash（目录也移入回收站）
     for d in sorted(b_dirs - a_dirs):
-        plan.extra_dirs.append(ExtraDir(path=d, pair_index=pair_index))
+        plan.trashes.append(TrashOp(
+            path=d,
+            size=0,
+            pair_index=pair_index,
+            is_dir=True,
+        ))
 
 
 # ═══════════════════════════════════════════════════════════════════

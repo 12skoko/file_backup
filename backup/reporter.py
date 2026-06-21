@@ -24,8 +24,6 @@ class DiffReport:
     moves: list[dict] = field(default_factory=list)
     trashes: list[dict] = field(default_factory=list)
     mkdirs: list[str] = field(default_factory=list)
-    extra_files: list[dict] = field(default_factory=list)
-    extra_dirs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -36,8 +34,6 @@ class DiffReport:
             "moves": self.moves,
             "trashes": self.trashes,
             "mkdirs": self.mkdirs,
-            "extra_files": self.extra_files,
-            "extra_dirs": self.extra_dirs,
         }
 
 
@@ -90,15 +86,10 @@ def build_diff_report(plan: Plan) -> DiffReport:
         for op in plan.moves
     ]
     trashes = [
-        {"path": op.path, "size": op.size, "pair_index": op.pair_index}
+        {"path": op.path, "size": op.size, "pair_index": op.pair_index, "is_dir": op.is_dir}
         for op in plan.trashes
     ]
     mkdirs = [op.path for op in plan.mkdirs]
-    extra_files = [
-        {"path": f.path, "size": f.size, "pair_index": f.pair_index}
-        for f in plan.extra_files
-    ]
-    extra_dirs = [d.path for d in plan.extra_dirs]
 
     return DiffReport(
         timestamp=_now_iso(),
@@ -107,16 +98,12 @@ def build_diff_report(plan: Plan) -> DiffReport:
             "will_move": len(moves),
             "will_trash": len(trashes),
             "will_mkdir": len(mkdirs),
-            "extra_on_target_files": len(extra_files),
-            "extra_on_target_dirs": len(extra_dirs),
             "total_bytes_upload": plan.total_upload_bytes,
         },
         uploads=uploads,
         moves=moves,
         trashes=trashes,
         mkdirs=mkdirs,
-        extra_files=extra_files,
-        extra_dirs=extra_dirs,
     )
 
 
@@ -147,6 +134,9 @@ def save_sync_report(report: SyncReport, report_dir: str) -> str:
 def format_diff_text(report: DiffReport) -> str:
     """生成可读的文本差异报告。"""
     s = report.summary
+    # 区分文件和目录的回收数量
+    trash_files = sum(1 for t in report.trashes if not t.get("is_dir", False))
+    trash_dirs = sum(1 for t in report.trashes if t.get("is_dir", False))
     lines = [
         "=" * 60,
         "  差异报告",
@@ -156,10 +146,9 @@ def format_diff_text(report: DiffReport) -> str:
         "── 摘要 ──",
         f"  新增（上传）:  {s['will_upload']} 个文件  ({_fmt_size(s['total_bytes_upload'])})",
         f"  移动（改名）:  {s['will_move']} 个文件",
-        f"  删除（回收）:  {s['will_trash']} 个文件",
+        f"  回收文件:      {trash_files} 个",
+        f"  回收目录:      {trash_dirs} 个",
         f"  新建目录:      {s['will_mkdir']} 个",
-        f"  B 端多余文件:  {s['extra_on_target_files']} 个",
-        f"  B 端多余目录:  {s['extra_on_target_dirs']} 个",
     ]
 
     if report.uploads:
@@ -180,19 +169,12 @@ def format_diff_text(report: DiffReport) -> str:
 
     if report.trashes:
         lines.append("")
-        lines.append("── 回收文件 ──")
+        lines.append("── 回收项目 ──")
         for t in report.trashes[:30]:
-            lines.append(f"  ✕ {t['path']}  ({_fmt_size(t['size'])})")
+            tag = "[目录]" if t.get("is_dir") else ""
+            lines.append(f"  ✕ {t['path']}  {tag}  ({_fmt_size(t['size'])})")
         if len(report.trashes) > 30:
             lines.append(f"  ... 还有 {len(report.trashes) - 30} 个")
-
-    if report.extra_files:
-        lines.append("")
-        lines.append("── B 端多余文件（不操作）──")
-        for f in report.extra_files[:20]:
-            lines.append(f"  ? {f['path']}  ({_fmt_size(f['size'])})")
-        if len(report.extra_files) > 20:
-            lines.append(f"  ... 还有 {len(report.extra_files) - 20} 个")
 
     lines.append("")
     lines.append("=" * 60)

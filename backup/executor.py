@@ -17,7 +17,12 @@ from .reporter import SyncResult
 # ═══════════════════════════════════════════════════════════════════
 
 def run_plan(plan: Plan, config: Config) -> SyncResult:
-    """按序执行操作计划，返回执行结果。"""
+    """按序执行操作计划，返回执行结果。
+
+    执行顺序：Mkdir → Trash → Move → Upload
+    - Mkdir 必须在 Upload 之前，确保文件的父目录已存在
+    - Mkdir 也必须在 Trash 之前，确保回收站时间戳目录已存在
+    """
     result = SyncResult()
 
     rclone_bin = config.rclone.binary
@@ -29,7 +34,25 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
     # 回收站时间戳
     ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
-    # ── 1. Trash ──
+    # ── 0. 预创建回收站时间戳目录（避免 rclone moveto 因目标目录不存在而 403）──
+    trash_rel = _strip_prefix(config.trash.dir, config.webdav.root)
+    trash_ts_dir = f"{trash_rel}/{ts}" if trash_rel else ts
+    _run([rclone_bin, "mkdir", f"{remote}:{trash_ts_dir}"], retries, dry_run)
+
+    # ── 1. Mkdir（先建目录，确保后续上传/移动的父目录存在）──
+    for op in plan.mkdirs:
+        remote_rel = _rclone_path(op.path, op.pair_index, config)
+        cmd = [
+            rclone_bin, "mkdir",
+            f"{remote}:{remote_rel}",
+        ]
+        ok, err = _run(cmd, retries, dry_run)
+        if ok:
+            result.mkdirs.append({"path": op.path, "status": "ok"})
+        else:
+            result.errors.append({"op": "mkdir", "path": op.path, "error": err})
+
+    # ── 2. Trash（回收站目录已存在，moveto 不会 403）──
     for op in plan.trashes:
         src_rel = _rclone_path(op.path, op.pair_index, config)
         trash_rel = _trash_rclone_path(op.path, ts, config)
@@ -48,7 +71,7 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
         else:
             result.errors.append({"op": "trash", "path": op.path, "error": err})
 
-    # ── 2. Move ──
+    # ── 3. Move ──
     for op in plan.moves:
         old_rel = _rclone_path(op.old_path, op.pair_index, config)
         new_rel = _rclone_path(op.new_path, op.pair_index, config)
@@ -72,7 +95,7 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
                 "error": err,
             })
 
-    # ── 3. Upload ──
+    # ── 4. Upload（目录已在步骤 1 创建，文件直接写入已存在的目录）──
     for op in plan.uploads:
         local_abs = os.path.join(op.local_root, op.path)
         remote_rel = _rclone_path(op.path, op.pair_index, config)
@@ -94,19 +117,6 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
             })
         else:
             result.errors.append({"op": "upload", "path": op.path, "error": err})
-
-    # ── 4. Mkdir ──
-    for op in plan.mkdirs:
-        remote_rel = _rclone_path(op.path, op.pair_index, config)
-        cmd = [
-            rclone_bin, "mkdir",
-            f"{remote}:{remote_rel}",
-        ]
-        ok, err = _run(cmd, retries, dry_run)
-        if ok:
-            result.mkdirs.append({"path": op.path, "status": "ok"})
-        else:
-            result.errors.append({"op": "mkdir", "path": op.path, "error": err})
 
     return result
 
