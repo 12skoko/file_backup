@@ -233,6 +233,7 @@ class BackupServer:
                     "serve", "webdav",
                     webdav_root,
                     "--addr", f":{webdav_port}",
+                    "--vfs-cache-mode", "writes",
                     "--quiet",
                 ],
                 stdout=subprocess.DEVNULL,
