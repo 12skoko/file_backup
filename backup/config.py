@@ -111,11 +111,11 @@ def load_config(config_path: str) -> Config:
 
     # ── 解析各段 ──
 
-    role = _require_str(raw, "role", "source | target")
+    role = _require_str(raw, "role")
 
     server = ServerConfig(
         port=_get_int(raw, "server", "port", 9527),
-        token=_require_str(raw, "server", "token", "server.token"),
+        token=_require_str(raw, "server", "token", label="server.token"),
     )
 
     paths = _parse_paths(raw)
@@ -125,16 +125,16 @@ def load_config(config_path: str) -> Config:
     )
 
     cache = CacheConfig(
-        dir=_require_str(raw, "cache", "dir", "cache.dir"),
+        dir=_require_str(raw, "cache", "dir", label="cache.dir"),
     )
 
     trash = TrashConfig(
-        dir=_require_str(raw, "trash", "dir", "trash.dir"),
+        dir=_require_str(raw, "trash", "dir", label="trash.dir"),
         keep_days=_get_int(raw, "trash", "keep_days", 30),
     )
 
     webdav = WebdavConfig(
-        root=_require_str(raw, "webdav", "root", "webdav.root"),
+        root=_require_str(raw, "webdav", "root", label="webdav.root"),
     )
 
     target = TargetConfig(
@@ -150,7 +150,7 @@ def load_config(config_path: str) -> Config:
 
     sync = SyncConfig(
         dry_run=_get_bool(raw, "sync", "dry_run", False),
-        report_dir=_require_str(raw, "sync", "report_dir", "sync.report_dir"),
+        report_dir=_require_str(raw, "sync", "report_dir", label="sync.report_dir"),
     )
 
     cfg = Config(
@@ -261,11 +261,12 @@ def _get(raw: dict, *keys: str):
     return cur
 
 
-def _require_str(raw: dict, *keys: str) -> str:
+def _require_str(raw: dict, *keys: str, label: str = "") -> str:
     """逐层取字符串值，缺失或为空则退出。"""
     val = _get(raw, *keys)
+    label = label or '.'.join(keys)
     if val is None or (isinstance(val, str) and not val.strip()):
-        die(f"{'.'.join(keys)} 必须是非空字符串")
+        die(f"{label} 必须是非空字符串")
     return str(val)
 
 
