@@ -150,14 +150,23 @@ def load_source_config(config_path: str) -> Config:
     rclone = _parse_rclone(raw)
     sync = _parse_sync(raw)
 
+    # ========== 修复核心：让 A 端也能读取 webdav 和 trash 配置 ==========
+    wd = raw.get("webdav", {})
+    webdav = WebdavConfig(
+        root=_get_str(wd, "root", "/backup"),
+        port=_get_int(wd, "port", 9528),
+    )
+    trash = _parse_trash(raw)
+    # =============================================================
+
     cfg = Config(
         role="source",
         server=ServerConfig(token=target.token),
         paths=paths,
         exclude=exclude,
         cache=cache,
-        trash=TrashConfig(),          # source 端不使用回收站
-        webdav=WebdavConfig(),        # source 端不启动 WebDAV
+        trash=trash,          # source 端不使用回收站
+        webdav=webdav,        # source 端不启动 WebDAV
         target=target,
         rclone=rclone,
         sync=sync,
