@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -159,6 +160,66 @@ def check_health(target_url: str, token: str, timeout: int = 10) -> bool:
         return False
 
 
+def trash_file(
+    target_url: str,
+    token: str,
+    path: str,
+    pair_index: int,
+    timestamp: str,
+    is_dir: bool = False,
+    timeout: int = 30,
+) -> dict:
+    """请求 B 端将文件/目录移入回收站（本地文件系统操作，瞬间完成）。"""
+    url = target_url.rstrip("/") + "/trash"
+    data = json.dumps({
+        "path": path,
+        "pair_index": pair_index,
+        "timestamp": timestamp,
+        "is_dir": is_dir,
+    }).encode("utf-8")
+    req = Request(url, data=data, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        body = _read_error_body(e)
+        raise ServerError(f"B 端回收操作失败 HTTP {e.code}: {body}")
+    except URLError as e:
+        raise ServerError(f"无法连接 B 端: {e.reason}")
+
+
+def move_file(
+    target_url: str,
+    token: str,
+    old_path: str,
+    new_path: str,
+    pair_index: int,
+    timeout: int = 30,
+) -> dict:
+    """请求 B 端重命名/移动文件（本地文件系统操作，瞬间完成）。"""
+    url = target_url.rstrip("/") + "/move"
+    data = json.dumps({
+        "old_path": old_path,
+        "new_path": new_path,
+        "pair_index": pair_index,
+    }).encode("utf-8")
+    req = Request(url, data=data, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        body = _read_error_body(e)
+        raise ServerError(f"B 端移动操作失败 HTTP {e.code}: {body}")
+    except URLError as e:
+        raise ServerError(f"无法连接 B 端: {e.reason}")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 多线程 HTTP 服务器
 # ═══════════════════════════════════════════════════════════════════
@@ -197,6 +258,21 @@ class _BackupHandler(BaseHTTPRequestHandler):
         elif path.startswith("/tree/"):
             task_id = path[len("/tree/"):]
             self._handle_tree_status(task_id)
+        else:
+            self._send_error(404, "Not Found")
+
+    def do_POST(self) -> None:
+        """写操作：回收站移动、文件重命名（均在 B 端本地执行）。"""
+        if not self._check_auth():
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        if path == "/trash":
+            self._handle_trash()
+        elif path == "/move":
+            self._handle_move()
         else:
             self._send_error(404, "Not Found")
 
@@ -264,6 +340,68 @@ class _BackupHandler(BaseHTTPRequestHandler):
             self._send_json(task["data"])
         else:
             self._send_error(500, json.dumps({"error": task.get("error", "unknown")}))
+
+    # ── 写操作（B 端本地文件系统，瞬间完成）──
+
+    def _handle_trash(self) -> None:
+        """将文件/目录移入回收站（本地 rename，O(1) 不论文件多大）。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, json.JSONDecodeError) as e:
+            self._send_error(400, json.dumps({"error": f"请求体解析失败: {e}"}))
+            return
+
+        path = body.get("path")
+        pair_index = body.get("pair_index", 0)
+        timestamp = body.get("timestamp", "")
+
+        if not path or not timestamp:
+            self._send_error(400, json.dumps({"error": "缺少 path 或 timestamp"}))
+            return
+
+        pair = self.config.paths[pair_index]
+        src_abs = os.path.join(pair.source, path)
+        trash_abs = os.path.join(self.config.trash.dir, timestamp, path)
+
+        try:
+            os.makedirs(os.path.dirname(trash_abs), exist_ok=True)
+            shutil.move(src_abs, trash_abs)
+            self._send_json({"status": "ok", "path": path})
+        except FileNotFoundError:
+            self._send_error(404, json.dumps({"error": f"文件不存在: {path}"}))
+        except OSError as e:
+            self._send_error(500, json.dumps({"error": str(e)}))
+
+    def _handle_move(self) -> None:
+        """在 B 端本地重命名/移动文件（本地 rename，O(1)）。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, json.JSONDecodeError) as e:
+            self._send_error(400, json.dumps({"error": f"请求体解析失败: {e}"}))
+            return
+
+        old_path = body.get("old_path")
+        new_path = body.get("new_path")
+        pair_index = body.get("pair_index", 0)
+
+        if not old_path or not new_path:
+            self._send_error(400, json.dumps({"error": "缺少 old_path 或 new_path"}))
+            return
+
+        pair = self.config.paths[pair_index]
+        old_abs = os.path.join(pair.source, old_path)
+        new_abs = os.path.join(pair.source, new_path)
+
+        try:
+            os.makedirs(os.path.dirname(new_abs), exist_ok=True)
+            shutil.move(old_abs, new_abs)
+            self._send_json({"status": "ok", "old": old_path, "new": new_path})
+        except FileNotFoundError:
+            self._send_error(404, json.dumps({"error": f"文件不存在: {old_path}"}))
+        except OSError as e:
+            self._send_error(500, json.dumps({"error": str(e)}))
 
     # ── 响应辅助 ──
 

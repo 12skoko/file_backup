@@ -10,6 +10,7 @@ from typing import Optional
 from .config import Config
 from .differ import Plan, MoveOp, UploadOp, TrashOp, MkdirOp
 from .reporter import SyncResult
+from .server import trash_file, move_file, ServerError
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -34,12 +35,9 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
     # 回收站时间戳
     ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
-    # ── 0. 预创建回收站时间戳目录 ──
-    trash_rel = _strip_prefix(config.trash.dir, config.webdav.root)
-    trash_ts_dir = f"{trash_rel}/{ts}" if trash_rel else ts
-    _run([rclone_bin, "mkdir", f"{remote}:{trash_ts_dir}"], retries, dry_run)
+    # ── 0. 预创建回收站时间戳目录（本地文件系统已由 B 端 API 处理，无需 rclone）──
 
-    # ── 1. Mkdir（先建目录，确保后续上传/移动的父目录存在）──
+    # ── 1. Mkdir（rclone mkdir，目录创建没有问题）──
     for op in plan.mkdirs:
         remote_rel = _rclone_path(op.path, op.pair_index, config)
         cmd = [
@@ -52,90 +50,46 @@ def run_plan(plan: Plan, config: Config) -> SyncResult:
         else:
             result.errors.append({"op": "mkdir", "path": op.path, "error": err})
 
-    # ── 2. Trash（copyto + deletefile/purge，绕开 WebDAV MOVE 的 403）──
+    # ── 2. Trash（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
     for op in plan.trashes:
-        src_rel = _rclone_path(op.path, op.pair_index, config)
-        trash_rel = _trash_rclone_path(op.path, ts, config)
-
-        # 2a. 复制到回收站
-        copy_cmd = [
-            rclone_bin, "copyto",
-            f"{remote}:{src_rel}",
-            f"{remote}:{trash_rel}",
-            "--retries", str(retries),
-        ]
-        ok, err = _run(copy_cmd, retries, dry_run)
-        if not ok:
-            result.errors.append({"op": "trash_copy", "path": op.path, "error": err})
-            continue
-
-        # 2b. 删除原文件／目录
-        if op.is_dir:
-            del_cmd = [rclone_bin, "purge", f"{remote}:{src_rel}"]
-        else:
-            del_cmd = [rclone_bin, "deletefile", f"{remote}:{src_rel}"]
-        ok2, err2 = _run(del_cmd, retries, dry_run)
-
-        trash_to = os.path.join(config.trash.dir, ts, op.path).replace("\\", "/")
-        if ok2:
+        try:
+            trash_file(
+                config.target.url,
+                config.target.token,
+                op.path,
+                op.pair_index,
+                ts,
+                is_dir=op.is_dir,
+            )
             result.trashed.append({
                 "path": op.path,
-                "trashed_to": trash_to,
+                "trashed_to": os.path.join(config.trash.dir, ts, op.path).replace("\\", "/"),
                 "status": "ok",
             })
-        else:
-            # 复制成功但删除失败——文件已进回收站但原位置残留
-            result.trashed.append({
-                "path": op.path,
-                "trashed_to": trash_to,
-                "status": "copied_but_delete_failed",
-            })
-            result.errors.append({"op": "trash_delete", "path": op.path, "error": err2})
+        except ServerError as e:
+            result.errors.append({"op": "trash", "path": op.path, "error": str(e)})
 
-    # ── 3. Move（copyto + deletefile，避免 WebDAV MOVE 跨目录 403）──
+    # ── 3. Move（B 端本地 rename，HTTP API，瞬间完成、不经过 WebDAV）──
     for op in plan.moves:
-        old_rel = _rclone_path(op.old_path, op.pair_index, config)
-        new_rel = _rclone_path(op.new_path, op.pair_index, config)
-
-        # 3a. 复制到新路径
-        copy_cmd = [
-            rclone_bin, "copyto",
-            f"{remote}:{old_rel}",
-            f"{remote}:{new_rel}",
-            "--retries", str(retries),
-        ]
-        ok, err = _run(copy_cmd, retries, dry_run)
-        if not ok:
-            result.errors.append({
-                "op": "move_copy",
-                "old": op.old_path,
-                "new": op.new_path,
-                "error": err,
-            })
-            continue
-
-        # 3b. 删除旧路径
-        del_cmd = [rclone_bin, "deletefile", f"{remote}:{old_rel}"]
-        ok2, err2 = _run(del_cmd, retries, dry_run)
-
-        if ok2:
+        try:
+            move_file(
+                config.target.url,
+                config.target.token,
+                op.old_path,
+                op.new_path,
+                op.pair_index,
+            )
             result.moved.append({
                 "old": op.old_path,
                 "new": op.new_path,
                 "status": "ok",
             })
-        else:
-            # 复制成功但删除失败——新路径已有文件，旧路径残留
-            result.moved.append({
-                "old": op.old_path,
-                "new": op.new_path,
-                "status": "copied_but_delete_failed",
-            })
+        except ServerError as e:
             result.errors.append({
-                "op": "move_delete",
+                "op": "move",
                 "old": op.old_path,
                 "new": op.new_path,
-                "error": err2,
+                "error": str(e),
             })
 
     # ── 4. Upload（目录已在步骤 1 创建，文件直接写入已存在的目录）──
