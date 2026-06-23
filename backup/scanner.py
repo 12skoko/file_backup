@@ -76,7 +76,10 @@ def _scan_one(name: str, root: Path, cache: "HashCache", ignore: IgnoreRules, re
                 stat = full.stat()
             except OSError:
                 continue
-            file_hash = cache.get_or_hash(name, full, stat.st_size, stat.st_mtime)
+            try:
+                file_hash = cache.get_or_hash(name, full, stat.st_size, stat.st_mtime)
+            except OSError:
+                continue
             entry = FileEntry(name=name, rel_path=rel_path, size=stat.st_size, mtime=stat.st_mtime, hash=file_hash)
             result.files[entry.path_key] = entry
 
