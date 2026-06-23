@@ -1,0 +1,65 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from backup.config import SourceConfig, TargetConfig
+from backup.executor import run_plan
+from backup.models import MkdirOp, Plan, UploadOp
+
+
+class ConfigExecutorTests(unittest.TestCase):
+    def test_executor_dry_run_maps_target_webdav_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_root = tmp_path / "a_photos"
+            target_root = tmp_path / "backup"
+            b_photos = target_root / "photos"
+            for path in [src_root, b_photos]:
+                path.mkdir(parents=True)
+            (src_root / "x.txt").write_text("x", encoding="utf-8")
+
+            source = SourceConfig(
+                path=tmp_path / "source.yaml",
+                token="t",
+                paths=[type("SourcePathLike", (), {"name": "photos", "source": src_root})()],
+                exclude_file=tmp_path / ".backupignore",
+                cache_dir=tmp_path / "cache_a",
+                api_url="http://127.0.0.1:9527",
+                rclone_remote="B",
+                scan_poll_interval_sec=2,
+                scan_timeout_sec=3600,
+                rclone_binary="rclone",
+                rclone_retries=3,
+                rclone_transfers=4,
+                dry_run=True,
+                report_dir=tmp_path / "reports",
+            )
+            target = TargetConfig(
+                path=tmp_path / "target.yaml",
+                host="127.0.0.1",
+                port=9527,
+                token="t",
+                webdav_host="127.0.0.1",
+                webdav_port=9528,
+                webdav_root=target_root,
+                paths=[type("TargetPathLike", (), {"name": "photos", "target": b_photos})()],
+                exclude_file=tmp_path / ".backupignore",
+                cache_dir=tmp_path / "cache_b",
+                trash_dir=target_root / ".backup_trash",
+                trash_keep_days=30,
+                scan_max_workers=1,
+                job_ttl_sec=3600,
+                result_ttl_sec=3600,
+                graceful_timeout_sec=10,
+                rclone_binary="rclone",
+            )
+            plan = Plan(uploads=[UploadOp("photos/x.txt", 1)], mkdirs=[MkdirOp("photos/newdir")])
+            results = run_plan(plan, source, target)
+
+            self.assertEqual(results["mkdirs"][0]["command"][-1], "B:photos/newdir")
+            self.assertEqual(results["uploaded"][0]["command"][2], str(src_root / "x.txt"))
+            self.assertEqual(results["uploaded"][0]["command"][3], "B:photos/x.txt")
+
+
+if __name__ == "__main__":
+    unittest.main()

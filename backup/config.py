@@ -1,488 +1,277 @@
-"""配置管理 — source / target 两套 YAML 格式，统一内部表示。"""
-
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from urllib.request import Request, urlopen
+import os
+import warnings
 
-import yaml
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 配置数据类（内部统一表示）
-# ═══════════════════════════════════════════════════════════════════
-
-@dataclass
-class PathPair:
-    """一对路径映射：A 端路径 → B 端路径。"""
-    source: str
-    target: str
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency is missing
+    yaml = None
 
 
-@dataclass
-class ServerConfig:
-    port: int = 9527
-    token: str = ""
+@dataclass(frozen=True)
+class SourcePath:
+    name: str
+    source: Path
 
 
-@dataclass
-class ExcludeConfig:
-    file: str = ".backupignore"
+@dataclass(frozen=True)
+class TargetPath:
+    name: str
+    target: Path
 
 
-@dataclass
-class CacheConfig:
-    dir: str = "/data/.backup"
+@dataclass(frozen=True)
+class SourceConfig:
+    path: Path
+    token: str
+    paths: list[SourcePath]
+    exclude_file: Path
+    cache_dir: Path
+    api_url: str
+    rclone_remote: str
+    scan_poll_interval_sec: float
+    scan_timeout_sec: float
+    rclone_binary: str
+    rclone_retries: int
+    rclone_transfers: int
+    dry_run: bool
+    report_dir: Path
 
 
-@dataclass
-class TrashConfig:
-    dir: str = "/backup/.backup_trash"
-    keep_days: int = 30
-
-
-@dataclass
-class WebdavConfig:
-    root: str = "/backup"
-    port: int = 9528
-
-
-@dataclass
+@dataclass(frozen=True)
 class TargetConfig:
-    url: str = ""
-    token: str = ""
-    rclone_remote: str = "B_webdav"
+    path: Path
+    host: str
+    port: int
+    token: str
+    webdav_host: str
+    webdav_port: int
+    webdav_root: Path
+    paths: list[TargetPath]
+    exclude_file: Path
+    cache_dir: Path
+    trash_dir: Path
+    trash_keep_days: int
+    scan_max_workers: int
+    job_ttl_sec: int
+    result_ttl_sec: int
+    graceful_timeout_sec: int
+    rclone_binary: str
 
 
-@dataclass
-class RcloneConfig:
-    binary: str = "rclone"
-    retries: int = 3
-    transfers: int = 4
+def load_source_config(config_path: str | Path, *, check_api: bool = False) -> SourceConfig:
+    path = _abs_path(config_path)
+    data = _read_yaml(path)
+    token = _required_str(data, "server.token")
+    paths = [
+        SourcePath(name=_required_item_str(item, "name"), source=_existing_dir(item, "source"))
+        for item in _required_list(data, "paths")
+    ]
+    _validate_unique_names([p.name for p in paths])
+    _warn_overlaps([p.source for p in paths])
 
+    target = _required_dict(data, "target")
+    api_url = str(target.get("api_url", "")).rstrip("/")
+    if not api_url:
+        raise ValueError("target.api_url cannot be empty")
+    if check_api:
+        _check_api(api_url, token)
 
-@dataclass
-class SyncConfig:
-    dry_run: bool = False
-    report_dir: str = "/data/.backup"
-
-
-@dataclass
-class Config:
-    """完整配置（内部使用）。"""
-    role: str                      # "source" | "target"
-    server: ServerConfig
-    paths: list[PathPair]
-    exclude: ExcludeConfig
-    cache: CacheConfig
-    trash: TrashConfig
-    webdav: WebdavConfig
-    target: TargetConfig
-    rclone: RcloneConfig
-    sync: SyncConfig
-
-    @property
-    def is_source(self) -> bool:
-        return self.role == "source"
-
-    @property
-    def is_target(self) -> bool:
-        return self.role == "target"
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 加载 A 端（source）配置
-# ═══════════════════════════════════════════════════════════════════
-
-def load_source_config(config_path: str) -> Config:
-    """加载 A 端 (source) 配置文件。
-
-    YAML 格式::
-
-        target:
-          url: http://192.168.1.100:9527
-          token: "shared-secret"
-          rclone_remote: B_webdav
-
-        paths:
-          - source: /mnt/photos
-            target: /backup/photos
-
-        exclude_file: .backupignore
-        cache_dir: /data/.backup
-
-        rclone:
-          binary: rclone
-          retries: 3
-          transfers: 4
-
-        sync:
-          dry_run: false
-          report_dir: /data/.backup
-    """
-    raw = _read_yaml(config_path)
-
-    # ── target 连接 ──
-    t = raw.get("target", {})
-    if not isinstance(t, dict):
-        die("target 段必须是字典")
-
-    target = TargetConfig(
-        url=_require_str(t, "url", label="target.url"),
-        token=_require_str(t, "token", label="target.token"),
-        rclone_remote=_get_str(t, "rclone_remote", "B_webdav"),
-    )
-
-    # ── 路径 ──
-    paths = _parse_source_paths(raw)
-
-    # ── 其他 ──
-    exclude = ExcludeConfig(
-        file=_get_str(raw, "exclude_file", ".backupignore"),
-    )
-
-    cache = CacheConfig(
-        dir=_require_str(raw, "cache_dir", label="cache_dir"),
-    )
-
-    rclone = _parse_rclone(raw)
-    sync = _parse_sync(raw)
-
-    # ========== 修复核心：让 A 端也能读取 webdav 和 trash 配置 ==========
-    wd = raw.get("webdav", {})
-    webdav = WebdavConfig(
-        root=_get_str(wd, "root", "/backup"),
-        port=_get_int(wd, "port", 9528),
-    )
-    trash = _parse_trash(raw)
-    # =============================================================
-
-    cfg = Config(
-        role="source",
-        server=ServerConfig(token=target.token),
+    base = path.parent
+    cfg = SourceConfig(
+        path=path,
+        token=token,
         paths=paths,
-        exclude=exclude,
-        cache=cache,
-        trash=trash,          # source 端不使用回收站
-        webdav=webdav,        # source 端不启动 WebDAV
-        target=target,
-        rclone=rclone,
-        sync=sync,
+        exclude_file=_config_path(base, data.get("exclude", {}).get("file", ".backupignore")),
+        cache_dir=_ensure_dir(_config_path(base, data.get("cache", {}).get("dir", ".backup"))),
+        api_url=api_url,
+        rclone_remote=str(target.get("rclone_remote", "")).strip(),
+        scan_poll_interval_sec=float(target.get("scan_poll_interval_sec", 2)),
+        scan_timeout_sec=float(target.get("scan_timeout_sec", 3600)),
+        rclone_binary=str(data.get("rclone", {}).get("binary", "rclone")),
+        rclone_retries=int(data.get("rclone", {}).get("retries", 3)),
+        rclone_transfers=int(data.get("rclone", {}).get("transfers", 4)),
+        dry_run=bool(data.get("sync", {}).get("dry_run", False)),
+        report_dir=_ensure_dir(_config_path(base, data.get("sync", {}).get("report_dir", ".backup"))),
     )
-
-    _validate_source(cfg)
+    if not cfg.rclone_remote:
+        raise ValueError("target.rclone_remote cannot be empty")
     return cfg
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 加载 B 端（target）配置
-# ═══════════════════════════════════════════════════════════════════
+def load_target_config(config_path: str | Path) -> TargetConfig:
+    path = _abs_path(config_path)
+    data = _read_yaml(path)
+    token = _required_str(data, "server.token")
+    server = _required_dict(data, "server")
+    webdav = _required_dict(data, "webdav")
+    webdav_root = _existing_dir(webdav, "root")
+    paths = [
+        TargetPath(name=_required_item_str(item, "name"), target=_existing_dir(item, "target"))
+        for item in _required_list(data, "paths")
+    ]
+    _validate_unique_names([p.name for p in paths])
+    _warn_overlaps([p.target for p in paths])
 
-def load_target_config(config_path: str) -> Config:
-    """加载 B 端 (target) 配置文件。
+    trash = _required_dict(data, "trash")
+    trash_dir = _ensure_dir(_config_path(path.parent, trash.get("dir", "")))
+    host = str(server.get("host", "0.0.0.0"))
+    port = int(server.get("port", 9527))
+    webdav_port = int(webdav.get("port", 9528))
+    if port == webdav_port:
+        raise ValueError("server.port and webdav.port must be different")
+    for target_path in paths:
+        _require_inside(target_path.target, webdav_root, f"target path {target_path.target}")
+    _require_inside(trash_dir, webdav_root, "trash.dir")
 
-    YAML 格式::
-
-        server:
-          port: 9527
-          token: "shared-secret"
-
-        webdav:
-          port: 9528
-          root: /backup
-
-        paths:
-          - /backup/photos
-          - /backup/docs
-
-        exclude_file: .backupignore
-        cache_dir: /data/.backup
-
-        trash:
-          dir: /backup/.backup_trash
-          keep_days: 30
-
-        rclone:
-          binary: rclone
-    """
-    raw = _read_yaml(config_path)
-
-    # ── 服务 ──
-    srv = raw.get("server", {})
-    if not isinstance(srv, dict):
-        die("server 段必须是字典")
-
-    server = ServerConfig(
-        port=_get_int(srv, "port", 9527),
-        token=_require_str(srv, "token", label="server.token"),
-    )
-
-    # ── WebDAV ──
-    wd = raw.get("webdav", {})
-    if not isinstance(wd, dict):
-        die("webdav 段必须是字典")
-
-    webdav = WebdavConfig(
-        root=_require_str(wd, "root", label="webdav.root"),
-        port=_get_int(wd, "port", server.port + 1),
-    )
-
-    # ── 路径 ──
-    paths = _parse_target_paths(raw)
-
-    # ── 其他 ──
-    exclude = ExcludeConfig(
-        file=_get_str(raw, "exclude_file", ".backupignore"),
-    )
-
-    cache = CacheConfig(
-        dir=_get_str(raw, "cache_dir", "/data/.backup"),
-    )
-
-    trash = _parse_trash(raw)
-    rclone = _parse_rclone(raw)
-
-    cfg = Config(
-        role="target",
-        server=server,
+    scan = data.get("scan", {})
+    return TargetConfig(
+        path=path,
+        host=host,
+        port=port,
+        token=token,
+        webdav_host=str(webdav.get("host", "0.0.0.0")),
+        webdav_port=webdav_port,
+        webdav_root=webdav_root,
         paths=paths,
-        exclude=exclude,
-        cache=cache,
-        trash=trash,
-        webdav=webdav,
-        target=TargetConfig(),        # target 端不需要连接对端
-        rclone=rclone,
-        sync=SyncConfig(),            # target 端不输出报告
+        exclude_file=_config_path(path.parent, data.get("exclude", {}).get("file", ".backupignore")),
+        cache_dir=_ensure_dir(_config_path(path.parent, data.get("cache", {}).get("dir", ".backup_cache"))),
+        trash_dir=trash_dir,
+        trash_keep_days=int(trash.get("keep_days", 30)),
+        scan_max_workers=int(scan.get("max_workers", 1)),
+        job_ttl_sec=int(scan.get("job_ttl_sec", 3600)),
+        result_ttl_sec=int(scan.get("result_ttl_sec", 3600)),
+        graceful_timeout_sec=int(scan.get("graceful_timeout_sec", 10)),
+        rclone_binary=str(data.get("rclone", {}).get("binary", "rclone")),
     )
 
-    _validate_target(cfg)
-    return cfg
+
+def target_rel_to_webdav(path: Path, webdav_root: Path) -> str:
+    rel = path.resolve().relative_to(webdav_root.resolve())
+    return rel.as_posix()
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 校验
-# ═══════════════════════════════════════════════════════════════════
-
-def _validate_source(cfg: Config) -> None:
-    """校验 source 配置。"""
-    if not cfg.paths:
-        die("paths 至少需要一对 source/target")
-
-    for i, pp in enumerate(cfg.paths):
-        if not os.path.isdir(pp.source):
-            die(f"paths[{i}].source 路径不存在或不是目录: {pp.source}")
-
-    _warn_overlapping(cfg.paths)
-
-    if not cfg.target.token:
-        die("target.token 不能为空")
-
-    if not cfg.target.url:
-        die("target.url 不能为空")
+def normalize_rel_path(path: str | Path) -> str:
+    raw = Path(path).as_posix()
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"relative path cannot contain '..': {path}")
+    return "/".join(parts)
 
 
-def _validate_target(cfg: Config) -> None:
-    """校验 target 配置。"""
-    if not cfg.server.token:
-        die("server.token 不能为空")
-
-    if not cfg.paths:
-        die("paths 至少需要一个路径")
-
-    for i, pp in enumerate(cfg.paths):
-        if not os.path.isdir(pp.source):
-            die(f"paths[{i}] 路径不存在或不是目录: {pp.source}")
-
-        # 所有路径必须在 webdav.root 下
-        src = os.path.realpath(pp.source)
-        root = os.path.realpath(cfg.webdav.root)
-        if not _is_under(src, root):
-            die(
-                f"paths[{i}] ({pp.source}) 不在 webdav.root "
-                f"({cfg.webdav.root}) 下。"
-            )
-
-    # 回收站也应在 webdav.root 下
-    trash_real = os.path.realpath(cfg.trash.dir)
-    root_real = os.path.realpath(cfg.webdav.root)
-    if not _is_under(trash_real, root_real):
-        warn(
-            f"trash.dir ({cfg.trash.dir}) 不在 webdav.root "
-            f"({cfg.webdav.root}) 下，rclone 将无法操作回收站。"
-        )
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if yaml is None:
+        raise RuntimeError("PyYAML is required. Install dependencies with: python -m pip install -r requirements.txt")
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a YAML mapping")
+    return data
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 段落解析
-# ═══════════════════════════════════════════════════════════════════
+def _abs_path(path: str | Path) -> Path:
+    return Path(path).expanduser().resolve()
 
-def _parse_source_paths(raw: dict) -> list[PathPair]:
-    """解析 source 端的 paths（必须含 source → target 映射）。"""
-    raw_paths = raw.get("paths", [])
-    if not raw_paths:
-        die("paths 至少需要一对 source/target")
 
-    result = []
-    for i, entry in enumerate(raw_paths):
-        if not isinstance(entry, dict):
-            die(f"paths[{i}] 必须是字典，格式: {{source: ..., target: ...}}")
-        source = entry.get("source", "")
-        target = entry.get("target", "")
-        if not source:
-            die(f"paths[{i}].source 不能为空")
-        if not target:
-            die(f"paths[{i}].target 不能为空")
-        result.append(PathPair(source=str(source), target=str(target)))
+def _config_path(base: Path, value: Any) -> Path:
+    p = Path(str(value)).expanduser()
+    if not p.is_absolute():
+        p = base / p
+    return p.resolve()
+
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def _existing_dir(item: dict[str, Any], key: str) -> Path:
+    p = _abs_path(_required_item_str(item, key))
+    if not p.is_dir():
+        raise ValueError(f"{key} must exist and be a directory: {p}")
+    return p
+
+
+def _required_dict(data: dict[str, Any], dotted: str) -> dict[str, Any]:
+    value: Any = data
+    for part in dotted.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"{dotted} is required")
+        value = value[part]
+    if not isinstance(value, dict):
+        raise ValueError(f"{dotted} must be a mapping")
+    return value
+
+
+def _required_list(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = data.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list")
+    if not all(isinstance(item, dict) for item in value):
+        raise ValueError(f"{key} items must be mappings")
+    return value
+
+
+def _required_str(data: dict[str, Any], dotted: str) -> str:
+    value: Any = data
+    for part in dotted.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"{dotted} is required")
+        value = value[part]
+    result = str(value).strip()
+    if not result:
+        raise ValueError(f"{dotted} cannot be empty")
     return result
 
 
-def _parse_target_paths(raw: dict) -> list[PathPair]:
-    """解析 target 端的 paths（字符串列表或字典列表）。"""
-    raw_paths = raw.get("paths", [])
-    if not raw_paths:
-        die("paths 至少需要一个路径")
-
-    result = []
-    for i, entry in enumerate(raw_paths):
-        if isinstance(entry, str):
-            result.append(PathPair(source=entry, target=entry))
-        elif isinstance(entry, dict):
-            source = entry.get("source", entry.get("path", ""))
-            target = entry.get("target", source)
-            if not source:
-                die(f"paths[{i}] 路径不能为空")
-            result.append(PathPair(source=str(source), target=str(target)))
-        else:
-            die(f"paths[{i}] 必须是字符串或字典")
+def _required_item_str(item: dict[str, Any], key: str) -> str:
+    result = str(item.get(key, "")).strip()
+    if not result:
+        raise ValueError(f"{key} cannot be empty")
     return result
 
 
-def _parse_rclone(raw: dict) -> RcloneConfig:
-    """解析 rclone 段。"""
-    r = raw.get("rclone", {})
-    if not isinstance(r, dict):
-        return RcloneConfig()
-    return RcloneConfig(
-        binary=_get_str(r, "binary", "rclone"),
-        retries=_get_int(r, "retries", 3),
-        transfers=_get_int(r, "transfers", 4),
-    )
+def _validate_unique_names(names: list[str]) -> None:
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate path names: {', '.join(duplicates)}")
 
 
-def _parse_sync(raw: dict) -> SyncConfig:
-    """解析 sync 段。"""
-    s = raw.get("sync", {})
-    if not isinstance(s, dict):
-        return SyncConfig()
-    return SyncConfig(
-        dry_run=_get_bool(s, "dry_run", False),
-        report_dir=_get_str(s, "report_dir", "/data/.backup"),
-    )
+def _warn_overlaps(paths: list[Path]) -> None:
+    normalized = [Path(os.path.normcase(str(p.resolve()))) for p in paths]
+    for i, left in enumerate(normalized):
+        for j, right in enumerate(normalized):
+            if i >= j:
+                continue
+            if _is_relative_to(left, right) or _is_relative_to(right, left):
+                warnings.warn(f"path mappings overlap: {paths[i]} and {paths[j]}", RuntimeWarning)
 
 
-def _parse_trash(raw: dict) -> TrashConfig:
-    """解析 trash 段。"""
-    t = raw.get("trash", {})
-    if not isinstance(t, dict):
-        return TrashConfig()
-    return TrashConfig(
-        dir=_get_str(t, "dir", "/backup/.backup_trash"),
-        keep_days=_get_int(t, "keep_days", 30),
-    )
+def _require_inside(child: Path, parent: Path, label: str) -> None:
+    if not _is_relative_to(child.resolve(), parent.resolve()):
+        raise ValueError(f"{label} must be under webdav.root: {parent}")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# YAML 读取辅助
-# ═══════════════════════════════════════════════════════════════════
-
-def _read_yaml(path_str: str) -> dict:
-    """读取 YAML 文件，返回顶层字典。"""
-    p = Path(path_str)
-    if not p.exists():
-        die(f"配置文件不存在: {path_str}")
-    with open(p, "r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-    if not isinstance(raw, dict):
-        die("配置文件格式错误：顶层必须是字典")
-    return raw
-
-
-def _require_str(d: dict, key: str, label: str = "") -> str:
-    """读取必需的非空字符串，缺失则报错退出。"""
-    val = d.get(key)
-    label = label or key
-    if val is None or (isinstance(val, str) and not val.strip()):
-        die(f"{label} 必须是非空字符串")
-    return str(val)
-
-
-def _get_str(d: dict, key: str, default: str = "") -> str:
-    """读取可选字符串。"""
-    val = d.get(key)
-    if val is None:
-        return default
-    return str(val)
-
-
-def _get_int(d: dict, key: str, default: int = 0) -> int:
-    """读取可选整数。"""
-    val = d.get(key)
-    if val is None:
-        return default
+def _is_relative_to(child: Path, parent: Path) -> bool:
     try:
-        return int(val)
-    except (ValueError, TypeError):
-        die(f"{key} 必须是整数，当前: {val}")
-        return default
-
-
-def _get_bool(d: dict, key: str, default: bool = False) -> bool:
-    """读取可选布尔值。"""
-    val = d.get(key)
-    if val is None:
-        return default
-    if isinstance(val, bool):
-        return val
-    die(f"{key} 必须是布尔值，当前: {val}")
-    return default
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 工具
-# ═══════════════════════════════════════════════════════════════════
-
-def _is_under(child: str, parent: str) -> bool:
-    """判断 child 路径是否在 parent 路径之下（含相等）。"""
-    try:
-        c = os.path.realpath(child).rstrip(os.sep) + os.sep
-        p = os.path.realpath(parent).rstrip(os.sep) + os.sep
-        return c.startswith(p)
-    except (OSError, ValueError):
+        child.relative_to(parent)
+        return True
+    except ValueError:
         return False
 
 
-def _warn_overlapping(paths: list[PathPair]) -> None:
-    """检查多对路径之间是否有重叠。"""
-    resolved = []
-    for pp in paths:
-        try:
-            resolved.append((pp.source, os.path.realpath(pp.source)))
-        except OSError:
-            continue
-    for i in range(len(resolved)):
-        for j in range(i + 1, len(resolved)):
-            si, ri = resolved[i]
-            sj, rj = resolved[j]
-            if _is_under(ri, rj) or _is_under(rj, ri):
-                warn(f"paths[{i}].source ({si}) 与 paths[{j}].source ({sj}) 路径有重叠")
-
-
-def die(msg: str) -> None:
-    print(f"[ERROR] {msg}", file=sys.stderr)
-    sys.exit(1)
-
-
-def warn(msg: str) -> None:
-    print(f"[WARN] {msg}", file=sys.stderr)
+def _check_api(api_url: str, token: str) -> None:
+    req = Request(f"{api_url}/health", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urlopen(req, timeout=5) as response:
+            if response.status >= 400:
+                raise ValueError(f"target.api_url health check failed: HTTP {response.status}")
+    except OSError as exc:
+        raise ValueError(f"target.api_url is not reachable: {api_url}") from exc
