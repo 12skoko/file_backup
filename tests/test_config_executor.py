@@ -4,7 +4,7 @@ from pathlib import Path
 
 from backup.config import SourceConfig, TargetConfig
 from backup.executor import run_plan
-from backup.models import MkdirOp, Plan, UploadOp
+from backup.models import FileEntry, MkdirOp, Plan, ScanResult, UploadOp
 
 
 class ConfigExecutorTests(unittest.TestCase):
@@ -59,6 +59,27 @@ class ConfigExecutorTests(unittest.TestCase):
             self.assertEqual(results["mkdirs"][0]["command"][-1], "B:photos/newdir")
             self.assertEqual(results["uploaded"][0]["command"][2], str(src_root / "x.txt"))
             self.assertEqual(results["uploaded"][0]["command"][3], "B:photos/x.txt")
+
+    def test_scan_result_from_dict_rebuilds_file_keys_from_entries(self):
+        result = ScanResult.from_dict(
+            {
+                "files": {
+                    "/x.txt": {
+                        "name": "photos",
+                        "rel_path": "x.txt",
+                        "size": 1,
+                        "mtime": 1,
+                        "hash": "h",
+                    }
+                },
+                "dirs": [],
+            }
+        )
+
+        self.assertEqual(
+            result.files,
+            {"photos/x.txt": FileEntry("photos", "x.txt", 1, 1, "h")},
+        )
 
 
 if __name__ == "__main__":

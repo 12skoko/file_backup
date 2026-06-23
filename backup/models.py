@@ -40,16 +40,16 @@ class ScanResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ScanResult":
-        files = {
-            key: FileEntry(
+        files: dict[str, FileEntry] = {}
+        for value in data.get("files", {}).values():
+            entry = FileEntry(
                 name=str(value["name"]),
                 rel_path=str(value["rel_path"]),
                 size=int(value["size"]),
                 mtime=float(value["mtime"]),
                 hash=str(value["hash"]),
             )
-            for key, value in data.get("files", {}).items()
-        }
+            files[entry.path_key] = entry
         dirs = [
             DirEntry(name=str(value["name"]), rel_path=str(value["rel_path"]))
             for value in data.get("dirs", [])

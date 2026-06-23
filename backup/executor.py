@@ -108,6 +108,10 @@ def _target_webdav_path(path_key: str, target: TargetConfig) -> str:
 
 
 def _split_key(path_key: str) -> tuple[str, str]:
+    path_key = path_key.strip("/")
     if "/" not in path_key:
         raise ValueError(f"invalid path key: {path_key}")
-    return path_key.split("/", 1)
+    name, rel_path = path_key.split("/", 1)
+    if not name or not rel_path:
+        raise ValueError(f"invalid path key: {path_key}")
+    return name, rel_path
