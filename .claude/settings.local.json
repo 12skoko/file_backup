@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import py_compile; [py_compile.compile\\(f, doraise=True\\) for f in ['backup/__init__.py','backup/config.py','backup/scanner.py','backup/differ.py','backup/server.py','backup/executor.py','backup/reporter.py','backup/cli.py','backup/__main__.py']]\")"
-    ]
-  }
-}

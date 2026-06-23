@@ -1,0 +1,13 @@
+.agent/
+.agents/
+.claude/
+
+source.yaml
+target.yaml
+.backupignore
+
+.backup/
+.backup_cache/
+.backup_trash/
+__pycache__/
+*.py[cod]
