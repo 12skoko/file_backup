@@ -41,11 +41,6 @@ def compare(scan_a: ScanResult, scan_b: ScanResult, *, allow_cross_map_moves: bo
     b_dirs = {d.path_key for d in scan_b.dirs}
     for path in sorted(a_dirs - b_dirs):
         plan.mkdirs.append(MkdirOp(path=path))
-    for path in sorted(b_dirs - a_dirs):
-        if _dir_has_unmatched_files(path, scan_b.files, matched_b):
-            plan.extra_dirs.append(path)
-        else:
-            plan.extra_dirs.append(path)
 
     return plan
 
@@ -89,8 +84,3 @@ def _basename(path: str) -> str:
 
 def _parent(path: str) -> str:
     return path.rsplit("/", 1)[0] if "/" in path else ""
-
-
-def _dir_has_unmatched_files(dir_key: str, files: dict[str, FileEntry], matched: set[str]) -> bool:
-    prefix = dir_key.rstrip("/") + "/"
-    return any(path_key.startswith(prefix) and path_key not in matched for path_key in files)
