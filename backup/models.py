@@ -93,5 +93,4 @@ class Plan:
     moves: list[MoveOp] = field(default_factory=list)
     trashes: list[TrashOp] = field(default_factory=list)
     mkdirs: list[MkdirOp] = field(default_factory=list)
-    extra_files: list[TrashOp] = field(default_factory=list)
     extra_dirs: list[str] = field(default_factory=list)

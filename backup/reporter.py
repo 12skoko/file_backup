@@ -18,7 +18,6 @@ def make_diff_report(plan: Plan) -> dict[str, Any]:
             "will_move": len(plan.moves),
             "will_trash": len(plan.trashes),
             "will_mkdir": len(plan.mkdirs),
-            "extra_on_target_files": len(plan.extra_files),
             "extra_on_target_dirs": len(plan.extra_dirs),
             "total_bytes_upload": sum(op.size for op in plan.uploads),
         },
@@ -26,7 +25,6 @@ def make_diff_report(plan: Plan) -> dict[str, Any]:
         "moves": [asdict(op) for op in plan.moves],
         "trashes": [asdict(op) for op in plan.trashes],
         "mkdirs": [op.path for op in plan.mkdirs],
-        "extra_files": [asdict(op) for op in plan.extra_files],
         "extra_dirs": plan.extra_dirs,
     }
 

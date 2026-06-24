@@ -35,9 +35,7 @@ def compare(scan_a: ScanResult, scan_b: ScanResult, *, allow_cross_map_moves: bo
 
     for path_key, b_entry in sorted(scan_b.files.items()):
         if path_key not in matched_b:
-            trash = TrashOp(path=path_key, size=b_entry.size)
-            plan.trashes.append(trash)
-            plan.extra_files.append(trash)
+            plan.trashes.append(TrashOp(path=path_key, size=b_entry.size))
 
     a_dirs = {d.path_key for d in scan_a.dirs}
     b_dirs = {d.path_key for d in scan_b.dirs}
