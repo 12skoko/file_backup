@@ -60,6 +60,37 @@ class ConfigExecutorTests(unittest.TestCase):
             self.assertEqual(results["uploaded"][0]["command"][2], str(src_root / "x.txt"))
             self.assertEqual(results["uploaded"][0]["command"][3], "B:photos/x.txt")
 
+    def test_executor_uses_target_roots_from_remote_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_root = tmp_path / "source"
+            src_root.mkdir()
+            (src_root / "x.txt").write_text("x", encoding="utf-8")
+            source = SourceConfig(
+                path=tmp_path / "source.yaml",
+                token="t",
+                paths=[type("SourcePathLike", (), {"name": "backup1", "source": src_root})()],
+                exclude_file=tmp_path / ".backupignore",
+                cache_dir=tmp_path / "cache_a",
+                api_url="http://127.0.0.1:9527",
+                rclone_remote="B",
+                scan_poll_interval_sec=2,
+                scan_timeout_sec=3600,
+                rclone_binary="rclone",
+                rclone_retries=3,
+                rclone_transfers=4,
+                dry_run=True,
+                report_dir=tmp_path / "reports",
+            )
+            plan = Plan(
+                uploads=[UploadOp("backup1/x.txt", 1)],
+                mkdirs=[MkdirOp("backup1/nested")],
+            )
+            results = run_plan(plan, source, target_roots={"backup1": "backup1"}, trash_root=".backup_trash")
+
+            self.assertEqual(results["mkdirs"][0]["command"][-1], "B:backup1/nested")
+            self.assertEqual(results["uploaded"][0]["command"][3], "B:backup1/x.txt")
+
     def test_scan_result_from_dict_rebuilds_file_keys_from_entries(self):
         result = ScanResult.from_dict(
             {
@@ -80,6 +111,19 @@ class ConfigExecutorTests(unittest.TestCase):
             result.files,
             {"photos/x.txt": FileEntry("photos", "x.txt", 1, 1, "h")},
         )
+
+    def test_scan_result_from_dict_preserves_target_roots(self):
+        result = ScanResult.from_dict(
+            {
+                "files": {},
+                "dirs": [],
+                "target_roots": {"backup1": "/backup1/"},
+                "trash_root": "/.backup_trash/",
+            }
+        )
+
+        self.assertEqual(result.target_roots, {"backup1": "backup1"})
+        self.assertEqual(result.trash_root, ".backup_trash")
 
 
 if __name__ == "__main__":

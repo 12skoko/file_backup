@@ -112,7 +112,7 @@ def load_target_config(config_path: str | Path) -> TargetConfig:
     webdav = _required_dict(data, "webdav")
     webdav_root = _existing_dir(webdav, "root")
     paths = [
-        TargetPath(name=_required_item_str(item, "name"), target=_existing_dir(item, "target"))
+        TargetPath(name=_required_item_str(item, "name"), target=_target_dir(webdav_root, item))
         for item in _required_list(data, "paths")
     ]
     _validate_unique_names([p.name for p in paths])
@@ -197,6 +197,19 @@ def _existing_dir(item: dict[str, Any], key: str) -> Path:
     if not p.is_dir():
         raise ValueError(f"{key} must exist and be a directory: {p}")
     return p
+
+
+def _target_dir(webdav_root: Path, item: dict[str, Any]) -> Path:
+    raw = _required_item_str(item, "target")
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        resolved = p.resolve()
+        if _is_relative_to(resolved, webdav_root.resolve()):
+            return _ensure_dir(resolved)
+        p = webdav_root / raw.strip("/\\")
+    else:
+        p = webdav_root / p
+    return _ensure_dir(p)
 
 
 def _required_dict(data: dict[str, Any], dotted: str) -> dict[str, Any]:

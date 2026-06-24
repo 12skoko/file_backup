@@ -31,11 +31,15 @@ class DirEntry:
 class ScanResult:
     files: dict[str, FileEntry] = field(default_factory=dict)
     dirs: list[DirEntry] = field(default_factory=list)
+    target_roots: dict[str, str] = field(default_factory=dict)
+    trash_root: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "files": {key: asdict(value) for key, value in self.files.items()},
             "dirs": [asdict(value) for value in self.dirs],
+            "target_roots": self.target_roots,
+            "trash_root": self.trash_root,
         }
 
     @classmethod
@@ -54,7 +58,9 @@ class ScanResult:
             DirEntry(name=str(value["name"]), rel_path=str(value["rel_path"]))
             for value in data.get("dirs", [])
         ]
-        return cls(files=files, dirs=dirs)
+        target_roots = {str(key): str(value).strip("/") for key, value in data.get("target_roots", {}).items()}
+        trash_root = data.get("trash_root")
+        return cls(files=files, dirs=dirs, target_roots=target_roots, trash_root=str(trash_root).strip("/") if trash_root else None)
 
 
 @dataclass(frozen=True)

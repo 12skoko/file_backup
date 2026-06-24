@@ -10,8 +10,15 @@ from .config import SourceConfig, TargetConfig, target_rel_to_webdav
 from .models import MkdirOp, MoveOp, Plan, TrashOp, UploadOp
 
 
-def run_plan(plan: Plan, source: SourceConfig, target: TargetConfig | None = None) -> dict[str, Any]:
-    runner = RcloneRunner(source)
+def run_plan(
+    plan: Plan,
+    source: SourceConfig,
+    target: TargetConfig | None = None,
+    *,
+    target_roots: dict[str, str] | None = None,
+    trash_root: str | None = None,
+) -> dict[str, Any]:
+    runner = RcloneRunner(source, target_roots=target_roots or {}, trash_root=trash_root)
     return {
         "mkdirs": [runner.mkdir(op, target) for op in plan.mkdirs],
         "trashed": [runner.trash(op, target) for op in plan.trashes],
@@ -22,28 +29,30 @@ def run_plan(plan: Plan, source: SourceConfig, target: TargetConfig | None = Non
 
 
 class RcloneRunner:
-    def __init__(self, source: SourceConfig):
+    def __init__(self, source: SourceConfig, *, target_roots: dict[str, str] | None = None, trash_root: str | None = None):
         self.source = source
+        self.target_roots = target_roots or {}
+        self.trash_root = trash_root
         self.errors: list[dict[str, Any]] = []
         self.trash_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def mkdir(self, op: MkdirOp, target: TargetConfig | None) -> dict[str, Any]:
-        remote_path = _target_webdav_path(op.path, target) if target else op.path
+        remote_path = self._remote_path(op.path, target)
         return self._run("mkdir", op.path, [self.source.rclone_binary, "mkdir", self._remote(remote_path)], {"remote": remote_path})
 
     def trash(self, op: TrashOp, target: TargetConfig | None) -> dict[str, Any]:
-        remote_path = _target_webdav_path(op.path, target) if target else op.path
+        remote_path = self._remote_path(op.path, target)
         dest = self._trash_path(op.path, target)
         return self._run("trash", op.path, [self.source.rclone_binary, "moveto", self._remote(remote_path), self._remote(dest)], {"remote": remote_path, "trashed_to": dest})
 
     def move(self, op: MoveOp, target: TargetConfig | None) -> dict[str, Any]:
-        old_remote = _target_webdav_path(op.old_path, target) if target else op.old_path
-        new_remote = _target_webdav_path(op.new_path, target) if target else op.new_path
+        old_remote = self._remote_path(op.old_path, target)
+        new_remote = self._remote_path(op.new_path, target)
         return self._run("move", op.old_path, [self.source.rclone_binary, "moveto", self._remote(old_remote), self._remote(new_remote)], {"new": op.new_path, "remote": old_remote, "new_remote": new_remote, "confidence": op.confidence})
 
     def upload(self, op: UploadOp, source: SourceConfig, target: TargetConfig | None) -> dict[str, Any]:
         local = _local_path_for_upload(op.path, source)
-        remote = op.path if target is None else _target_webdav_path(op.path, target)
+        remote = self._remote_path(op.path, target)
         cmd = [
             source.rclone_binary,
             "copyto",
@@ -83,8 +92,19 @@ class RcloneRunner:
     def _remote(self, path: str) -> str:
         return f"{self.source.rclone_remote}:{path}"
 
+    def _remote_path(self, path: str, target: TargetConfig | None) -> str:
+        if target is not None:
+            return _target_webdav_path(path, target)
+        name, rel_path = _split_key(path)
+        target_root = self.target_roots.get(name)
+        if target_root is None:
+            return path
+        return f"{target_root.strip('/')}/{rel_path}".strip("/")
+
     def _trash_path(self, path: str, target: TargetConfig | None) -> str:
         if target is None:
+            if self.trash_root:
+                return f"{self.trash_root.strip('/')}/{self.trash_timestamp}/{path}"
             return f".backup_trash/{self.trash_timestamp}/{path}"
         trash_rel = target_rel_to_webdav(target.trash_dir, target.webdav_root)
         return f"{trash_rel}/{self.trash_timestamp}/{path}"

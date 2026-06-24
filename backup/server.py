@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 
-from .config import TargetConfig, load_target_config
+from .config import TargetConfig, load_target_config, target_rel_to_webdav
 from .ignore import load_ignore_rules
 from .models import ScanResult
 from .scanner import scan_paths
@@ -84,6 +84,11 @@ class ScanService:
         try:
             ignore = load_ignore_rules(self.config.exclude_file)
             result = scan_paths(self.config.paths, self.config.cache_dir, ignore)
+            result.target_roots = {
+                path.name: target_rel_to_webdav(path.target, self.config.webdav_root)
+                for path in self.config.paths
+            }
+            result.trash_root = target_rel_to_webdav(self.config.trash_dir, self.config.webdav_root)
             with self.lock:
                 job.result = result
                 job.status = "done"

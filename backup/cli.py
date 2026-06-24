@@ -34,13 +34,13 @@ def main(argv: list[str] | None = None) -> int:
         serve(args.config)
         return 0
     if args.command == "diff":
-        plan, source, _, diff_report = _build_plan(args.config, args.target_config)
+        plan, source, _, diff_report, _, _ = _build_plan(args.config, args.target_config)
         print_report(diff_report)
         path = save_report(diff_report, source.report_dir)
         print(f"report saved: {path}")
         return 0
     if args.command == "sync":
-        plan, source, target, diff_report = _build_plan(args.config, args.target_config)
+        plan, source, target, diff_report, target_roots, trash_root = _build_plan(args.config, args.target_config)
         print_report(diff_report)
         save_report(diff_report, source.report_dir)
         if not args.yes:
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("cancelled")
                 return 1
         start = time.monotonic()
-        results = run_plan(plan, source, target)
+        results = run_plan(plan, source, target, target_roots=target_roots, trash_root=trash_root)
         sync_report = make_sync_report(diff_report, results, time.monotonic() - start)
         print_report(sync_report)
         path = save_report(sync_report, source.report_dir)
@@ -73,7 +73,7 @@ def _build_plan(config_path: str, target_config_path: str | None):
     )
     plan = compare(scan_a, scan_b)
     diff_report = make_diff_report(plan)
-    return plan, source, target, diff_report
+    return plan, source, target, diff_report, scan_b.target_roots, scan_b.trash_root
 
 
 if __name__ == "__main__":
