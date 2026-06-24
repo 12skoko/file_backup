@@ -2,12 +2,49 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backup.config import SourceConfig, TargetConfig
+from backup.config import SourceConfig, TargetConfig, load_target_config
 from backup.executor import run_plan
 from backup.models import FileEntry, MkdirOp, Plan, ScanResult, UploadOp
 
+try:
+    import yaml  # noqa: F401
+except ModuleNotFoundError:
+    yaml = None
+
 
 class ConfigExecutorTests(unittest.TestCase):
+    def test_target_config_treats_target_and_trash_as_webdav_relative_paths(self):
+        if yaml is None:
+            self.skipTest("PyYAML is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            webdav_root = tmp_path / "backup"
+            webdav_root.mkdir()
+            config = tmp_path / "target.yaml"
+            config.write_text(
+                f"""
+server:
+  host: 127.0.0.1
+  port: 9527
+  token: t
+webdav:
+  host: 127.0.0.1
+  port: 9528
+  root: {webdav_root.as_posix()}
+paths:
+  - name: backup1
+    target: /backup1
+trash:
+  dir: /.backup_trash
+""",
+                encoding="utf-8",
+            )
+
+            target = load_target_config(config)
+
+            self.assertEqual(target.paths[0].target, webdav_root / "backup1")
+            self.assertEqual(target.trash_dir, webdav_root / ".backup_trash")
+
     def test_executor_dry_run_maps_target_webdav_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

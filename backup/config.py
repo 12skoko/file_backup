@@ -112,14 +112,14 @@ def load_target_config(config_path: str | Path) -> TargetConfig:
     webdav = _required_dict(data, "webdav")
     webdav_root = _existing_dir(webdav, "root")
     paths = [
-        TargetPath(name=_required_item_str(item, "name"), target=_target_dir(webdav_root, item))
+        TargetPath(name=_required_item_str(item, "name"), target=_webdav_child_dir(webdav_root, _required_item_str(item, "target")))
         for item in _required_list(data, "paths")
     ]
     _validate_unique_names([p.name for p in paths])
     _warn_overlaps([p.target for p in paths])
 
     trash = _required_dict(data, "trash")
-    trash_dir = _ensure_dir(_config_path(path.parent, trash.get("dir", "")))
+    trash_dir = _webdav_child_dir(webdav_root, _required_item_str(trash, "dir"))
     host = str(server.get("host", "0.0.0.0"))
     port = int(server.get("port", 9527))
     webdav_port = int(webdav.get("port", 9528))
@@ -199,8 +199,7 @@ def _existing_dir(item: dict[str, Any], key: str) -> Path:
     return p
 
 
-def _target_dir(webdav_root: Path, item: dict[str, Any]) -> Path:
-    raw = _required_item_str(item, "target")
+def _webdav_child_dir(webdav_root: Path, raw: str) -> Path:
     p = Path(raw).expanduser()
     if p.is_absolute():
         resolved = p.resolve()
